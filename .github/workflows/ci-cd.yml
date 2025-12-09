@@ -64,6 +64,11 @@ jobs:
         echo "STORAGE_ACCOUNT=$STORAGE_ACCOUNT" >> $GITHUB_ENV
         echo "CONTAINER_NAME=$CONTAINER_NAME" >> $GITHUB_ENV
 
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.9.0"
+
     - name: Setup Terraform Backend
       run: |
         cat > terraform/backend.tf <<EOF
