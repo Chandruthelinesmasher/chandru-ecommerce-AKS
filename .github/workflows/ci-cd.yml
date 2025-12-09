@@ -7,6 +7,7 @@ on:
 env:
   TF_VAR_location: "eastus"
   TF_VAR_resource_group_name: "rg-chandru-ecomm"
+  TF_VAR_node_vm_size: "Standard_DC2s_v3"
   TF_LOG: INFO
 
 jobs:
