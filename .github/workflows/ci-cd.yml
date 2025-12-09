@@ -43,7 +43,7 @@ jobs:
         STORAGE_ACCOUNT=$(echo $STORAGE_ACCOUNT | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER_NAME="tfstate"
 
-        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
+        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} || true
 
         az storage account create \
           -n $STORAGE_ACCOUNT \
@@ -61,15 +61,15 @@ jobs:
     - name: Setup Terraform Backend
       run: |
         cat > terraform/backend.tf <<EOF
-terraform {
-  backend "azurerm" {
-    resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-    storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
-    container_name       = "${{ env.CONTAINER_NAME }}"
-    key                  = "terraform.tfstate"
-  }
-}
-EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
+            container_name       = "${{ env.CONTAINER_NAME }}"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
 
     - name: Terraform Init
       run: |
@@ -111,9 +111,8 @@ EOF
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
     - name: ACR Login
-      uses: azure/docker-login@v1
-      with:
-        login-server: ${{ needs.terraform-infra.outputs.acr_login_server }}
+      run: |
+        az acr login --name ${{ needs.terraform-infra.outputs.acr_name }}
 
     - name: Build Product Image
       run: |
