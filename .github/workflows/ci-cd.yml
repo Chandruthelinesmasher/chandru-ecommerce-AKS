@@ -1,0 +1,133 @@
+name: Full Infra + App Deployment (No Manual Terraform)
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  TF_VAR_location: "eastus"
+  TF_VAR_resource_group_name: "rg-chandru-ecomm"
+  TF_LOG: INFO
+
+jobs:
+
+  terraform-infra:
+    name: Provision Infra (Terraform)
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Login to Azure using OIDC (No Secrets)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Create Storage Account for Terraform State (idempotent)
+      run: |
+        RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
+        STORAGE_ACCOUNT="tf${RANDOM}state${RANDOM}"
+        CONTAINER_NAME="tfstate"
+
+        # Create RG
+        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
+
+        # Create Storage Account
+        az storage account create \
+          -n $STORAGE_ACCOUNT \
+          -g $RESOURCE_GROUP \
+          -l ${{ env.TF_VAR_location }} \
+          --sku Standard_LRS
+
+        # Create Container
+        az storage container create \
+          --name $CONTAINER_NAME \
+          --account-name $STORAGE_ACCOUNT
+
+        echo "STORAGE_ACCOUNT=$STORAGE_ACCOUNT" >> $GITHUB_ENV
+        echo "CONTAINER_NAME=$CONTAINER_NAME" >> $GITHUB_ENV
+
+    - name: Setup Terraform Backend
+      run: |
+        cat > terraform/backend.tf <<EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
+            container_name       = "${{ env.CONTAINER_NAME }}"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Apply Auto
+      run: |
+        cd terraform
+        terraform apply -auto-approve
+
+    - name: Terraform Outputs
+      id: tfout
+      run: |
+        cd terraform
+        echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
+        echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
+        echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
+        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
+        echo "kube_config=$(terraform output -raw kube_admin_config_raw)" >> $GITHUB_OUTPUT
+
+  app-deploy:
+    name: Build, Push & Deploy App
+    needs: terraform-infra
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Login to Azure using OIDC
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: ACR Login
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ needs.terraform-infra.outputs.acr_login_server }}
+
+    - name: Build Product Image
+      run: |
+        docker build -t ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
+        docker push ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}
+
+    - name: Set AKS Context
+      uses: azure/aks-set-context@v3
+      with:
+        cluster-name: ${{ needs.terraform-infra.outputs.aks_name }}
+        resource-group: ${{ needs.terraform-infra.outputs.resource_group }}
+
+    - name: Deploy to AKS
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}|" k8s/product-deployment.yaml | kubectl apply -f -
+        kubectl apply -f k8s/product-service.yaml
+        kubectl apply -f k8s/product-hpa.yaml
+        kubectl apply -f k8s/product-pdb.yaml
+        kubectl apply -f k8s/ingress.yaml

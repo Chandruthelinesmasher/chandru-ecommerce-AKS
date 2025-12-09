@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ecomm-ingress
+  namespace: ecomm
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    - host: YOUR_DOMAIN  # replace after deployment
+      http:
+        paths:
+          - path: /products
+            pathType: Prefix
+            backend:
+              service:
+                name: product
+                port:
+                  number: 80

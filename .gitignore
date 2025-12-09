@@ -1,0 +1,6 @@
+terraform.tfstate
+terraform.tfstate.backup
+*.pyc
+__pycache__/
+kubeconfig_admin.yaml
+.env

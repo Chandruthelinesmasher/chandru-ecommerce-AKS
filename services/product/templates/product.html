@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>{{ product.title }}</title></head>
+  <body>
+    <a href="{{ url_for('index') }}">Back</a>
+    <h1>{{ product.title }}</h1>
+    <p>{{ product.description }}</p>
+    <p>Price: ${{ "%.2f"|format(product.price) }}</p>
+    <form method="post" action="/api/cart/demo-user">
+      <input type="hidden" name="product_id" value="{{ product.id }}">
+      <input type="number" name="quantity" value="1" min="1">
+      <button type="submit">Add to cart</button>
+    </form>
+  </body>
+</html>
