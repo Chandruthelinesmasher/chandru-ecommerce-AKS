@@ -10,12 +10,7 @@ resource "azurerm_subnet" "aks_subnet" {
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.20.1.0/24"]
-
-  delegation {
-    name = "aks_delegation"
-    service_delegation {
-      name    = "Microsoft.ContainerService/managedClusters"
-      actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
-    }
-  }
+  
+  # DO NOT add delegation for AKS - it's not supported
+  # AKS will manage the subnet without explicit delegation
 }
