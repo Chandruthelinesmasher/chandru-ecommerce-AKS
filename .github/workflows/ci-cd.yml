@@ -1,4 +1,4 @@
-name: Full Infra + App Deployment
+name: Full Infra + App Deployment (No Manual Terraform)
 
 on:
   push:
@@ -21,6 +21,7 @@ jobs:
 
     outputs:
       acr_login_server: ${{ steps.tfout.outputs.acr_login_server }}
+      acr_name: ${{ steps.tfout.outputs.acr_name }}
       aks_name: ${{ steps.tfout.outputs.aks_name }}
       resource_group: ${{ steps.tfout.outputs.resource_group }}
 
@@ -28,14 +29,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Login to Azure using OIDC (No Secrets)
+    - name: Login to Azure using OIDC
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Create Storage Account for Terraform State (idempotent)
+    - name: Create Storage Account for Terraform State
       run: |
         RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
         STORAGE_ACCOUNT="tf${GITHUB_RUN_ID}state"
@@ -60,15 +61,15 @@ jobs:
     - name: Setup Terraform Backend
       run: |
         cat > terraform/backend.tf <<EOF
-        terraform {
-          backend "azurerm" {
-            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-            storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
-            container_name       = "${{ env.CONTAINER_NAME }}"
-            key                  = "terraform.tfstate"
-          }
-        }
-        EOF
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+    storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
+    container_name       = "${{ env.CONTAINER_NAME }}"
+    key                  = "terraform.tfstate"
+  }
+}
+EOF
 
     - name: Terraform Init
       run: |
@@ -85,6 +86,7 @@ jobs:
       run: |
         cd terraform
         echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
+        echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
         echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
         echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
 
@@ -109,8 +111,9 @@ jobs:
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
     - name: ACR Login
-      run: |
-        az acr login --name ${{ needs.terraform-infra.outputs.acr_login_server }}
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ needs.terraform-infra.outputs.acr_login_server }}
 
     - name: Build Product Image
       run: |
