@@ -49,7 +49,10 @@ jobs:
         STORAGE_ACCOUNT=$(echo $STORAGE_ACCOUNT | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER_NAME="tfstate"
 
-        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} || true
+        # Only create resource group if it doesn't exist
+        if ! az group show -n $RESOURCE_GROUP &>/dev/null; then
+          az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
+        fi
 
         az storage account create \
           -n $STORAGE_ACCOUNT \
@@ -86,6 +89,16 @@ jobs:
       run: |
         cd terraform
         terraform init
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Import Existing Resource Group
+      run: |
+        cd terraform
+        terraform import azurerm_resource_group.rg /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }} || true
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
