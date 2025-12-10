@@ -4,16 +4,16 @@ metadata:
   name: ecomm-ingress
   namespace: ecomm
   annotations:
-    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
+  ingressClassName: nginx
   rules:
-    - host: chantech.xyz  # replace after deployment
-      http:
-        paths:
-          - path: /products
-            pathType: Prefix
-            backend:
-              service:
-                name: product
-                port:
-                  number: 80
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: product
+            port:
+              number: 80

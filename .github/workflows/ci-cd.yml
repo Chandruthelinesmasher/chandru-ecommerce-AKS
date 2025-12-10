@@ -174,11 +174,32 @@ jobs:
         docker build -t ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
         docker push ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}
 
+    - name: Attach ACR to AKS
+      run: |
+        az aks update \
+          --name ${{ needs.terraform-infra.outputs.aks_name }} \
+          --resource-group ${{ needs.terraform-infra.outputs.resource_group }} \
+          --attach-acr ${{ needs.terraform-infra.outputs.acr_name }}
+
     - name: Set AKS Context
       uses: azure/aks-set-context@v3
       with:
         cluster-name: ${{ needs.terraform-infra.outputs.aks_name }}
         resource-group: ${{ needs.terraform-infra.outputs.resource_group }}
+
+    - name: Install NGINX Ingress Controller
+      run: |
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+        helm repo update
+        
+        # Check if already installed
+        if ! helm list -n ingress-nginx | grep -q nginx-ingress; then
+          helm install nginx-ingress ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
+            --wait --timeout 5m
+        fi
 
     - name: Deploy to AKS
       run: |
@@ -188,3 +209,47 @@ jobs:
         kubectl apply -f k8s/product-hpa.yaml
         kubectl apply -f k8s/product-pdb.yaml
         kubectl apply -f k8s/ingress.yaml
+
+    - name: Wait for Pods to be Ready
+      run: |
+        echo "Waiting for pods to be ready..."
+        kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
+
+    - name: Get Ingress External IP
+      run: |
+        echo "Waiting for Load Balancer IP..."
+        for i in {1..30}; do
+          EXTERNAL_IP=$(kubectl get svc nginx-ingress-ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -n "$EXTERNAL_IP" ]; then
+            echo "✅ Load Balancer IP assigned: $EXTERNAL_IP"
+            echo "INGRESS_IP=$EXTERNAL_IP" >> $GITHUB_ENV
+            echo ""
+            echo "=========================================="
+            echo "🌐 YOUR APPLICATION IS NOW ACCESSIBLE AT:"
+            echo "   http://$EXTERNAL_IP"
+            echo "=========================================="
+            echo ""
+            break
+          fi
+          echo "Attempt $i/30: Waiting for external IP..."
+          sleep 10
+        done
+        
+        if [ -z "$EXTERNAL_IP" ]; then
+          echo "⚠️  External IP not assigned yet. Check manually with:"
+          echo "   kubectl get svc -n ingress-nginx"
+        fi
+
+    - name: Display All Service Information
+      run: |
+        echo "=== Ingress Controller Service ==="
+        kubectl get svc -n ingress-nginx
+        echo ""
+        echo "=== Application Pods ==="
+        kubectl get pods -n ecomm
+        echo ""
+        echo "=== Ingress Resources ==="
+        kubectl get ingress -n ecomm
+        echo ""
+        echo "=== Application Service ==="
+        kubectl get svc -n ecomm
