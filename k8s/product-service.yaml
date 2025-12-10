@@ -7,6 +7,6 @@ spec:
   selector:
     app: product
   ports:
-    - port: 80
-      targetPort: 80
+    - port: 80          # External service port (keep as 80 ✅)
+      targetPort: 8000  # ✅ FIXED → maps to container 8000
   type: ClusterIP

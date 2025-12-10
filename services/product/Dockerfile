@@ -29,4 +29,7 @@ ENV APP_VERSION="v1.0.0"
 EXPOSE 80
 
 # ✅ ✅ ✅ CORRECT GUNICORN ENTRYPOINT
-CMD ["gunicorn", "--bind", "0.0.0.0:80", "app:app", "--workers", "2", "--timeout", "30"]
+EXPOSE 8000
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app", "--workers", "2", "--timeout", "30"]
+
+

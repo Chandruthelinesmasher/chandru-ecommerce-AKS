@@ -16,25 +16,28 @@ spec:
         app: product
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "80"
+        prometheus.io/port: "8000"   # ✅ FIXED
     spec:
       containers:
         - name: product
           image: IMAGE_REPLACED_BY_CI
           ports:
-            - containerPort: 80
+            - containerPort: 8000    # ✅ FIXED
+
           readinessProbe:
             httpGet:
               path: /health
-              port: 80
+              port: 8000             # ✅ FIXED
             initialDelaySeconds: 5
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /health
-              port: 80
+              port: 8000             # ✅ FIXED
             initialDelaySeconds: 15
             periodSeconds: 20
+
           resources:
             requests:
               cpu: "100m"
