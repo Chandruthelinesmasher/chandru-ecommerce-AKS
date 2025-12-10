@@ -1,56 +1,52 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Chandru E-Commerce — Catalog</title>
-    <style>
-      body{font-family:Arial, sans-serif;background:#0f0346;color:#fff;padding:20px}
-      .grid{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px}
-      .search-form{margin:20px 0}
-      .search-form input{padding:8px;border-radius:4px;border:none;margin-right:8px}
-      .search-form button{padding:8px 16px;border-radius:4px;border:none;background:#4CAF50;color:white;cursor:pointer}
-      .pagination{margin-top:20px;display:flex;gap:8px}
-      .pagination a{padding:8px 12px;background:rgba(255,255,255,0.1);border-radius:4px;text-decoration:none;color:#fff}
-      .pagination a.active{background:#4CAF50}
-      a{color:#4CAF50}
-    </style>
-  </head>
-  <body>
-    <header><h1>Chandru E-Commerce Store ({{ version }})</h1></header>
-    
-    <form method="get" class="search-form">
-      <input name="q" placeholder="Search products..." value="{{ q }}" />
-      <button type="submit">Search</button>
-    </form>
+{% extends "base.html" %}
 
-    <div class="grid">
-      {% for p in products %}
-        <div style="border-radius:8px;padding:12px;background:rgba(255,255,255,0.03);width:260px;">
-          <h3><a href="{{ url_for('product_page', product_id=p.id) }}">{{ p.title }}</a></h3>
-          <p>{{ p.description[:120] }}...</p>
-          <div><strong>${{ "%.2f"|format(p.price) }}</strong></div>
-        </div>
-      {% else %}
-        <p>No products found.</p>
-      {% endfor %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-bold">Products</h1>
+  <p class="text-gray-500 text-sm">Browse our latest products</p>
+</div>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+
+  {% for p in products %}
+  <div class="bg-white rounded-xl shadow p-4 flex flex-col card-hover">
+    <div class="h-40 bg-gray-100 rounded mb-3 flex items-center justify-center text-gray-400">
+      Image
     </div>
 
-    <!-- Pagination Controls -->
-    {% if pages > 1 %}
-    <div class="pagination">
-      {% if page > 1 %}
-        <a href="?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}">← Previous</a>
-      {% endif %}
-      
-      {% for p in range(1, pages + 1) %}
-        <a href="?page={{ p }}{% if q %}&q={{ q }}{% endif %}" 
-           class="{% if p == page %}active{% endif %}">{{ p }}</a>
-      {% endfor %}
-      
-      {% if page < pages %}
-        <a href="?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}">Next →</a>
-      {% endif %}
+    <h2 class="font-semibold text-lg">{{ p.title }}</h2>
+    <p class="text-gray-500 text-sm mt-1 truncate">{{ p.description }}</p>
+
+    <div class="mt-4 flex justify-between items-center">
+      <div>
+        <div class="font-bold text-lg">₹{{ "%.2f"|format(p.price) }}</div>
+        <div class="text-xs text-gray-500">Stock: {{ p.stock }}</div>
+      </div>
+
+      <a
+        href="/product/{{ p.id }}"
+        class="bg-primary text-white text-sm px-3 py-2 rounded hover:bg-accent"
+      >
+        View
+      </a>
     </div>
-    {% endif %}
-  </body>
-</html>
+  </div>
+  {% endfor %}
+
+</div>
+
+<!-- ✅ PAGINATION -->
+{% if pages and pages > 1 %}
+<div class="flex justify-center mt-10 space-x-2">
+  {% for num in range(1, pages + 1) %}
+    <a
+      href="?page={{ num }}{% if q %}&q={{ q }}{% endif %}"
+      class="px-3 py-1 rounded border text-sm
+      {% if num == page %}bg-primary text-white{% else %}bg-white{% endif %}">
+      {{ num }}
+    </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}

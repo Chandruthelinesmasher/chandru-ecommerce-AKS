@@ -7,7 +7,7 @@ import time
 from functools import wraps
 from threading import Event
 
-from flask import Flask, jsonify, request, abort, render_template
+from flask import Flask, jsonify, request, abort, render_template, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
 from redis import Redis, RedisError
@@ -18,7 +18,7 @@ from werkzeug.exceptions import HTTPException
 # --------- Configuration ----------
 DB_DEFAULT = "sqlite:///./product.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", DB_DEFAULT)
-REDIS_URL = os.environ.get("REDIS_URL", None)
+REDIS_URL = os.environ.get("REDIS_URL")
 SECRET_KEY = os.environ.get("SECRET_KEY", "changeme")
 APP_VERSION = os.environ.get("APP_VERSION", "v1.0.0")
 
@@ -61,6 +61,7 @@ def record_metrics(endpoint):
         @wraps(func)
         def wrapper(*args, **kwargs):
             start = time.time()
+            status = 200
             try:
                 response = func(*args, **kwargs)
                 status = getattr(response, "status_code", 200)
@@ -75,6 +76,7 @@ def record_metrics(endpoint):
                 duration = time.time() - start
                 HTTP_LATENCY.labels(endpoint=endpoint).observe(duration)
                 HTTP_REQUESTS.labels(method=request.method, endpoint=endpoint, http_status=str(status)).inc()
+
         return wrapper
     return decorator
 
@@ -85,11 +87,12 @@ def init_models(app):
 
     class Product(db.Model):
         __tablename__ = "products"
+
         id = db.Column(db.Integer, primary_key=True)
         title = db.Column(db.String(255), nullable=False)
         description = db.Column(db.Text)
         price = db.Column(db.Float, nullable=False)
-        currency = db.Column(db.String(8), default="USD")
+        currency = db.Column(db.String(8), default="INR")
         stock = db.Column(db.Integer, default=0)
         created_at = db.Column(db.DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
@@ -106,10 +109,11 @@ def init_models(app):
     with app.app_context():
         db.create_all()
 
+    app.Product = Product
     return Product
 
 
-# --------- ✅ FLASK FACTORY ----------
+# --------- Factory ----------
 def create_app(config=None):
     configure_logging()
 
@@ -123,6 +127,7 @@ def create_app(config=None):
 
     app.wsgi_app = ProxyFix(app.wsgi_app)
 
+    # Configuration
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SECRET_KEY"] = SECRET_KEY
@@ -131,8 +136,10 @@ def create_app(config=None):
     if config:
         app.config.update(config)
 
+    # Init DB
     Product = init_models(app)
 
+    # Redis
     global redis_client
     if REDIS_URL:
         try:
@@ -144,23 +151,23 @@ def create_app(config=None):
     else:
         app.logger.info("Redis not configured; using in-memory cache")
 
-    # ---------- Errors ----------
+    # --------- Error Handling ----------
     @app.errorhandler(Exception)
     def handle_exception(e):
         app.logger.exception("Unhandled exception")
-        code = 500
+        status = 500
         if isinstance(e, HTTPException):
-            code = e.code
-        return jsonify({"error": str(e)}), code
+            status = e.code
+        return jsonify({"error": str(e)}), status
 
-    # ---------- Health ----------
+    # --------- Health ----------
     @app.route("/health")
     def health():
         try:
             db.session.execute(text("SELECT 1"))
             return jsonify({"status": "ok"}), 200
         except Exception:
-            return jsonify({"status": "degraded"}), 503
+            return jsonify({"status": 'degraded'}), 503
 
     @app.route("/ready")
     def ready():
@@ -170,7 +177,12 @@ def create_app(config=None):
     def metrics():
         return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
-    # ---------- ✅ FIXED WEB INDEX WITH PAGINATION ----------
+    # --------- Serve style.css from templates folder ----------
+    @app.route("/templates/<path:filename>")
+    def template_static(filename):
+        return send_from_directory(os.path.join(BASE_DIR, "templates"), filename)
+
+    # --------- HOME PAGE ----------
     @app.route("/", methods=["GET"])
     @record_metrics("index")
     def index():
@@ -180,32 +192,36 @@ def create_app(config=None):
 
         query = Product.query
         if q:
-            like_q = f"%{q}%"
+            like = f"%{q}%"
             query = query.filter(
-                db.or_(Product.title.ilike(like_q), Product.description.ilike(like_q))
+                db.or_(Product.title.ilike(like), Product.description.ilike(like))
             )
 
         pag = query.order_by(Product.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
 
-        items = pag.items
-
         return render_template(
             "index.html",
-            products=[p.to_dict() for p in items],
+            products=[p.to_dict() for p in pag.items],
             page=page,
             pages=pag.pages,
             q=q,
             version=APP_VERSION,
         )
 
-    # ---------- REST API ----------
+    # --------- PRODUCT PAGE ----------
+    @app.route("/product/<int:product_id>")
+    def product_page(product_id):
+        p = Product.query.get_or_404(product_id)
+        return render_template("product.html", product=p.to_dict())
+
+    # --------- API ----------
     @app.route("/api/products")
     def api_products():
         return jsonify([p.to_dict() for p in Product.query.all()])
 
-    # ---------- Shutdown ----------
+    # --------- Shutdown ----------
     def handle_sigterm(signum, frame):
         app.logger.info("Shutdown signal received")
         shutdown_event.set()
@@ -216,7 +232,7 @@ def create_app(config=None):
     return app
 
 
-# ✅ LOCAL DEV ONLY
+# --------- Local Dev ---------
 if __name__ == "__main__":
     app = create_app()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

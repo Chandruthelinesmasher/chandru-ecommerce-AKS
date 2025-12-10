@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ title or "Chandru Shop" }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: "#0ea5a4",
+              accent: "#7c3aed",
+            },
+          },
+        },
+      };
+    </script>
+
+    <!-- ✅ CSS FROM TEMPLATES FOLDER -->
+    <link rel="stylesheet" href="/templates/style.css">
+  </head>
+
+  <body class="bg-gray-50 text-gray-800">
+
+    <!-- NAVBAR -->
+    <header class="bg-white shadow">
+      <div class="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+        <a href="/" class="text-xl font-bold text-primary">Chandru Shop</a>
+
+        <form method="get" action="/" class="hidden sm:block">
+          <input
+            type="text"
+            name="q"
+            value="{{ q or '' }}"
+            placeholder="Search products..."
+            class="px-4 py-2 border rounded-lg w-72"
+          />
+        </form>
+
+        <div class="space-x-4">
+          <a href="#" class="text-sm hover:text-primary">Cart</a>
+          <a href="#" class="text-sm hover:text-primary">Account</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-8">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="bg-white border-t mt-10">
+      <div class="max-w-7xl mx-auto px-4 py-6 text-sm text-gray-500 text-center">
+        © 2025 Chandru Shop — Powered by AKS 🚀
+      </div>
+    </footer>
+
+  </body>
+</html>
