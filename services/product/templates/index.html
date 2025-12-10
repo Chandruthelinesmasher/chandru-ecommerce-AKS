@@ -1,52 +1,86 @@
 {% extends "base.html" %}
 
-{% block content %}
-<div class="mb-6">
-  <h1 class="text-2xl font-bold">Products</h1>
-  <p class="text-gray-500 text-sm">Browse our latest products</p>
-</div>
-
-<div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-
-  {% for p in products %}
-  <div class="bg-white rounded-xl shadow p-4 flex flex-col card-hover">
-    <div class="h-40 bg-gray-100 rounded mb-3 flex items-center justify-center text-gray-400">
-      Image
-    </div>
-
-    <h2 class="font-semibold text-lg">{{ p.title }}</h2>
-    <p class="text-gray-500 text-sm mt-1 truncate">{{ p.description }}</p>
-
-    <div class="mt-4 flex justify-between items-center">
+{% block hero %}
+<!-- HERO -->
+<section class="mb-8">
+  <div class="bg-gradient-to-r from-primary/90 to-blue-500 rounded-xl p-8 text-white">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
       <div>
-        <div class="font-bold text-lg">₹{{ "%.2f"|format(p.price) }}</div>
-        <div class="text-xs text-gray-500">Stock: {{ p.stock }}</div>
+        <h2 class="text-3xl font-bold">Better deals. Everyday.</h2>
+        <p class="mt-2 text-sm opacity-90">Top picks, trending products and handpicked deals just for you.</p>
+        <div class="mt-4 flex space-x-3">
+          <a href="#products" class="bg-white text-primary px-4 py-2 rounded-full font-medium">Shop now</a>
+          <a href="#products" class="border border-white/30 px-4 py-2 rounded-full text-sm">Explore categories</a>
+        </div>
       </div>
 
-      <a
-        href="/product/{{ p.id }}"
-        class="bg-primary text-white text-sm px-3 py-2 rounded hover:bg-accent"
-      >
-        View
-      </a>
+      <div class="hidden md:block w-64 h-40 bg-white/10 rounded-lg flex items-center justify-center">
+        <div class="text-xs">Hero Image</div>
+      </div>
     </div>
   </div>
-  {% endfor %}
+</section>
 
-</div>
+<!-- CATEGORIES strip -->
+<section class="mb-6">
+  <div class="flex gap-4 overflow-x-auto pb-2">
+    {% for cat in ['Mobiles','Audio','Laptops','Home','Appliances','Fashion'] %}
+      <a href="?q={{ cat }}" class="min-w-max px-4 py-2 bg-white rounded-lg shadow-sm text-sm">{{ cat }}</a>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
 
-<!-- ✅ PAGINATION -->
-{% if pages and pages > 1 %}
-<div class="flex justify-center mt-10 space-x-2">
-  {% for num in range(1, pages + 1) %}
-    <a
-      href="?page={{ num }}{% if q %}&q={{ q }}{% endif %}"
-      class="px-3 py-1 rounded border text-sm
-      {% if num == page %}bg-primary text-white{% else %}bg-white{% endif %}">
-      {{ num }}
-    </a>
-  {% endfor %}
-</div>
-{% endif %}
+{% block content %}
+<!-- Products grid -->
+<section id="products">
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-2xl font-bold">Products</h1>
+      <div class="text-sm text-muted">Browse our latest curated products</div>
+    </div>
 
+    <div class="flex items-center gap-3">
+      <div class="text-sm text-muted">Sort:</div>
+      <select onchange="this.form?.submit?.()" class="border rounded px-2 py-1 text-sm">
+        <option value="">Popular</option>
+        <option value="price_asc">Price: Low to High</option>
+        <option value="price_desc">Price: High to Low</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+    {% for p in products %}
+    <article class="bg-white rounded-lg shadow hover:shadow-lg transition card-hover flex flex-col overflow-hidden">
+      <a href="/product/{{ p.id }}" class="block p-4 flex-1">
+        <div class="h-44 bg-gray-100 rounded mb-3 flex items-center justify-center text-gray-400">Image</div>
+        <h3 class="font-semibold text-lg line-clamp-2">{{ p.title }}</h3>
+        <p class="text-sm text-muted mt-2 line-clamp-2">{{ p.description }}</p>
+      </a>
+
+      <div class="p-4 border-t flex items-center justify-between gap-4">
+        <div>
+          <div class="text-xl font-bold">₹{{ '%.2f'|format(p.price) }}</div>
+          <div class="text-xs text-muted">In stock: {{ p.stock }}</div>
+        </div>
+
+        <div class="flex flex-col items-end">
+          <button class="bg-primary text-white px-3 py-2 rounded hover:bg-blue-600 text-sm">Add</button>
+          <a href="/product/{{ p.id }}" class="text-xs text-muted mt-2">View</a>
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+
+  <!-- pagination -->
+  {% if pages and pages > 1 %}
+  <nav class="mt-8 flex items-center justify-center space-x-2">
+    {% for num in range(1, pages+1) %}
+      <a href="?page={{ num }}{% if q %}&q={{ q }}{% endif %}" class="px-3 py-1 rounded-md text-sm {% if num==page %}bg-primary text-white{% else %}bg-white border{% endif %}">{{ num }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+</section>
 {% endblock %}

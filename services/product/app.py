@@ -9,13 +9,13 @@ from threading import Event
 
 from flask import Flask, jsonify, request, abort, render_template, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
+from sqlalchemy import text, or_
 from redis import Redis, RedisError
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.exceptions import HTTPException
 
-# --------- Configuration ----------
+# ---------------- CONFIG ----------------
 DB_DEFAULT = "sqlite:///./product.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", DB_DEFAULT)
 REDIS_URL = os.environ.get("REDIS_URL")
@@ -26,12 +26,12 @@ db = SQLAlchemy()
 redis_client = None
 shutdown_event = Event()
 
-# Prometheus metrics
+# ---------------- METRICS ----------------
 HTTP_REQUESTS = Counter("http_requests_total", "Total HTTP requests", ["method", "endpoint", "http_status"])
 HTTP_LATENCY = Histogram("http_request_latency_seconds", "HTTP request latency", ["endpoint"])
 
 
-# --------- Logging ----------
+# ---------------- LOGGING ----------------
 def configure_logging():
     class JsonFormatter(logging.Formatter):
         def format(self, record):
@@ -55,7 +55,7 @@ def configure_logging():
     root.addHandler(handler)
 
 
-# --------- Metrics Decorator ----------
+# ---------------- METRIC DECORATOR ----------------
 def record_metrics(endpoint):
     def decorator(func):
         @wraps(func)
@@ -75,13 +75,16 @@ def record_metrics(endpoint):
             finally:
                 duration = time.time() - start
                 HTTP_LATENCY.labels(endpoint=endpoint).observe(duration)
-                HTTP_REQUESTS.labels(method=request.method, endpoint=endpoint, http_status=str(status)).inc()
-
+                HTTP_REQUESTS.labels(
+                    method=request.method,
+                    endpoint=endpoint,
+                    http_status=str(status),
+                ).inc()
         return wrapper
     return decorator
 
 
-# --------- Models ----------
+# ---------------- MODELS ----------------
 def init_models(app):
     db.init_app(app)
 
@@ -103,17 +106,16 @@ def init_models(app):
                 "description": self.description,
                 "price": self.price,
                 "currency": self.currency,
-                "stock": self.stock
+                "stock": self.stock,
             }
 
     with app.app_context():
         db.create_all()
 
-    app.Product = Product
     return Product
 
 
-# --------- Factory ----------
+# ---------------- APP FACTORY ----------------
 def create_app(config=None):
     configure_logging()
 
@@ -127,7 +129,7 @@ def create_app(config=None):
 
     app.wsgi_app = ProxyFix(app.wsgi_app)
 
-    # Configuration
+    # -------- CONFIG ----------
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SECRET_KEY"] = SECRET_KEY
@@ -136,10 +138,10 @@ def create_app(config=None):
     if config:
         app.config.update(config)
 
-    # Init DB
+    # -------- DB ----------
     Product = init_models(app)
 
-    # Redis
+    # -------- REDIS ----------
     global redis_client
     if REDIS_URL:
         try:
@@ -148,10 +150,11 @@ def create_app(config=None):
             app.logger.info("Connected to Redis")
         except RedisError:
             redis_client = None
+            app.logger.warning("Redis configured but connection failed")
     else:
         app.logger.info("Redis not configured; using in-memory cache")
 
-    # --------- Error Handling ----------
+    # -------- ERROR HANDLER ----------
     @app.errorhandler(Exception)
     def handle_exception(e):
         app.logger.exception("Unhandled exception")
@@ -160,14 +163,14 @@ def create_app(config=None):
             status = e.code
         return jsonify({"error": str(e)}), status
 
-    # --------- Health ----------
+    # -------- HEALTH CHECKS ----------
     @app.route("/health")
     def health():
         try:
             db.session.execute(text("SELECT 1"))
             return jsonify({"status": "ok"}), 200
         except Exception:
-            return jsonify({"status": 'degraded'}), 503
+            return jsonify({"status": "degraded"}), 503
 
     @app.route("/ready")
     def ready():
@@ -177,12 +180,12 @@ def create_app(config=None):
     def metrics():
         return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
-    # --------- Serve style.css from templates folder ----------
+    # -------- SERVE style.css FROM templates ----------
     @app.route("/templates/<path:filename>")
     def template_static(filename):
         return send_from_directory(os.path.join(BASE_DIR, "templates"), filename)
 
-    # --------- HOME PAGE ----------
+    # -------- HOME PAGE ----------
     @app.route("/", methods=["GET"])
     @record_metrics("index")
     def index():
@@ -191,14 +194,15 @@ def create_app(config=None):
         q = request.args.get("q", "").strip()
 
         query = Product.query
+
         if q:
             like = f"%{q}%"
-            query = query.filter(
-                db.or_(Product.title.ilike(like), Product.description.ilike(like))
-            )
+            query = query.filter(or_(Product.title.ilike(like), Product.description.ilike(like)))
 
         pag = query.order_by(Product.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
+            page=page,
+            per_page=per_page,
+            error_out=False
         )
 
         return render_template(
@@ -207,21 +211,38 @@ def create_app(config=None):
             page=page,
             pages=pag.pages,
             q=q,
-            version=APP_VERSION,
+            version=APP_VERSION
         )
 
-    # --------- PRODUCT PAGE ----------
+    # -------- PRODUCT PAGE ----------
     @app.route("/product/<int:product_id>")
     def product_page(product_id):
         p = Product.query.get_or_404(product_id)
         return render_template("product.html", product=p.to_dict())
 
-    # --------- API ----------
+    # -------- API ----------
     @app.route("/api/products")
     def api_products():
         return jsonify([p.to_dict() for p in Product.query.all()])
 
-    # --------- Shutdown ----------
+    # -------- ADMIN SEED ----------
+    @app.route("/admin/seed", methods=["POST"])
+    def admin_seed():
+        sample = [
+            ("iPhone 15", "Latest Apple smartphone", 79999, 50),
+            ("Galaxy S24", "Samsung flagship phone", 72999, 40),
+            ("Noise Headphones", "Wireless ANC headphones", 5999, 200),
+            ("MacBook Air", "Apple M2 laptop", 109999, 15),
+            ("Gaming Keyboard", "RGB mechanical keyboard", 3999, 120),
+        ]
+
+        for t, d, p, s in sample:
+            db.session.add(Product(title=t, description=d, price=p, stock=s))
+
+        db.session.commit()
+        return jsonify({"status": "seeded"}), 201
+
+    # -------- SHUTDOWN ----------
     def handle_sigterm(signum, frame):
         app.logger.info("Shutdown signal received")
         shutdown_event.set()
@@ -232,7 +253,7 @@ def create_app(config=None):
     return app
 
 
-# --------- Local Dev ---------
+# ---------------- LOCAL RUN ----------------
 if __name__ == "__main__":
     app = create_app()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
