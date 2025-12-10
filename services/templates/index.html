@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Chandru E-Commerce — Catalog</title>
+    <style>
+      body{font-family:Arial, sans-serif;background:#0f0346;color:#fff;padding:20px}
+      .grid{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px}
+      .search-form{margin:20px 0}
+      .search-form input{padding:8px;border-radius:4px;border:none;margin-right:8px}
+      .search-form button{padding:8px 16px;border-radius:4px;border:none;background:#4CAF50;color:white;cursor:pointer}
+      .pagination{margin-top:20px;display:flex;gap:8px}
+      .pagination a{padding:8px 12px;background:rgba(255,255,255,0.1);border-radius:4px;text-decoration:none;color:#fff}
+      .pagination a.active{background:#4CAF50}
+      a{color:#4CAF50}
+    </style>
+  </head>
+  <body>
+    <header><h1>Chandru E-Commerce Store ({{ version }})</h1></header>
+    
+    <form method="get" class="search-form">
+      <input name="q" placeholder="Search products..." value="{{ q }}" />
+      <button type="submit">Search</button>
+    </form>
+
+    <div class="grid">
+      {% for p in products %}
+        <div style="border-radius:8px;padding:12px;background:rgba(255,255,255,0.03);width:260px;">
+          <h3><a href="{{ url_for('product_page', product_id=p.id) }}">{{ p.title }}</a></h3>
+          <p>{{ p.description[:120] }}...</p>
+          <div><strong>${{ "%.2f"|format(p.price) }}</strong></div>
+        </div>
+      {% else %}
+        <p>No products found.</p>
+      {% endfor %}
+    </div>
+
+    <!-- Pagination Controls -->
+    {% if pages > 1 %}
+    <div class="pagination">
+      {% if page > 1 %}
+        <a href="?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}">← Previous</a>
+      {% endif %}
+      
+      {% for p in range(1, pages + 1) %}
+        <a href="?page={{ p }}{% if q %}&q={{ q }}{% endif %}" 
+           class="{% if p == page %}active{% endif %}">{{ p }}</a>
+      {% endfor %}
+      
+      {% if page < pages %}
+        <a href="?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}">Next →</a>
+      {% endif %}
+    </div>
+    {% endif %}
+  </body>
+</html>
