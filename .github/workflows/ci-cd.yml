@@ -65,16 +65,16 @@ jobs:
     - name: Write Backend Config
       run: |
         mkdir -p terraform
-        cat > terraform/backend.tf <<EOF
-terraform {
-  backend "azurerm" {
-    resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-    storage_account_name = "${{ steps.backend.outputs.storage }}"
-    container_name       = "${{ steps.backend.outputs.container }}"
-    key                  = "terraform.tfstate"
-  }
-}
-EOF
+        cat > terraform/backend.tf << 'EOF'
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ steps.backend.outputs.storage }}"
+            container_name       = "${{ steps.backend.outputs.container }}"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
 
     - name: Upload Backend File
       uses: actions/upload-artifact@v4
