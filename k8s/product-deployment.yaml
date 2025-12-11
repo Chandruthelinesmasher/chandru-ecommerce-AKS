@@ -58,6 +58,6 @@ spec:
         - name: tmp-volume
           mountPath: /tmp
 
-      volumes:
+      volumes:   # ← THIS MUST BE ALIGNED WITH containers
       - name: tmp-volume
         emptyDir: {}

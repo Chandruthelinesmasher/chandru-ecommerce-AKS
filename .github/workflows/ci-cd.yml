@@ -253,3 +253,5 @@ jobs:
         echo ""
         echo "=== Application Service ==="
         kubectl get svc -n ecomm
+
+        
