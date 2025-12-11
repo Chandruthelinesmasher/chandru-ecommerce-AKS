@@ -44,23 +44,23 @@ jobs:
       run: |
         RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
         STORAGE="tf${GITHUB_RUN_ID}state"
-        STORAGE=$(echo $STORAGE | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
+        STORAGE=$(echo "$STORAGE" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER="tfstate"
 
-        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
+        az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
 
         az storage account create \
-          -n $STORAGE \
-          -g $RESOURCE_GROUP \
+          -n "$STORAGE" \
+          -g "$RESOURCE_GROUP" \
           -l ${{ env.TF_VAR_location }} \
           --sku Standard_LRS
 
         az storage container create \
-          --name $CONTAINER \
-          --account-name $STORAGE
+          --name "$CONTAINER" \
+          --account-name "$STORAGE"
 
-        echo "storage=$STORAGE" >> $GITHUB_OUTPUT
-        echo "container=$CONTAINER" >> $GITHUB_OUTPUT
+        echo "storage=$STORAGE" >> "$GITHUB_OUTPUT"
+        echo "container=$CONTAINER" >> "$GITHUB_OUTPUT"
 
     - name: Write Backend File
       run: |
@@ -135,10 +135,10 @@ EOF
       id: capture
       run: |
         cd terraform
-        echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
-        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
-        echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
-        echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
+        echo "acr_name=$(terraform output -raw acr_name)" >> "$GITHUB_OUTPUT"
+        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> "$GITHUB_OUTPUT"
+        echo "aks_name=$(terraform output -raw aks_name)" >> "$GITHUB_OUTPUT"
+        echo "resource_group=$(terraform output -raw resource_group)" >> "$GITHUB_OUTPUT"
 
   #########################################################
   # STAGE 3 — BUILD & PUSH IMAGE TO ACR
