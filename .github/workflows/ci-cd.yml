@@ -180,10 +180,28 @@ jobs:
       id: capture
       run: |
         cd terraform
-        echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
-        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
-        echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
-        echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
+        ACR_NAME=$(terraform output -raw acr_name 2>/dev/null || echo "")
+        ACR_LOGIN=$(terraform output -raw acr_login_server 2>/dev/null || echo "")
+        AKS_NAME=$(terraform output -raw aks_name 2>/dev/null || echo "")
+        RG_NAME=$(terraform output -raw resource_group 2>/dev/null || echo "")
+        
+        echo "Captured values:"
+        echo "ACR Name: $ACR_NAME"
+        echo "ACR Login Server: $ACR_LOGIN"
+        echo "AKS Name: $AKS_NAME"
+        echo "Resource Group: $RG_NAME"
+        
+        if [ -z "$ACR_NAME" ] || [ -z "$ACR_LOGIN" ] || [ -z "$AKS_NAME" ] || [ -z "$RG_NAME" ]; then
+          echo "ERROR: One or more Terraform outputs are empty!"
+          echo "Available outputs:"
+          terraform output
+          exit 1
+        fi
+        
+        echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
+        echo "acr_login_server=$ACR_LOGIN" >> $GITHUB_OUTPUT
+        echo "aks_name=$AKS_NAME" >> $GITHUB_OUTPUT
+        echo "resource_group=$RG_NAME" >> $GITHUB_OUTPUT
 
 
 
@@ -204,6 +222,15 @@ jobs:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Verify ACR Name
+      run: |
+        if [ -z "${{ needs.terraform.outputs.acr_name }}" ]; then
+          echo "ERROR: ACR name is empty!"
+          exit 1
+        fi
+        echo "ACR Name: ${{ needs.terraform.outputs.acr_name }}"
+        echo "ACR Login Server: ${{ needs.terraform.outputs.acr_login_server }}"
 
     - name: ACR Login
       run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
