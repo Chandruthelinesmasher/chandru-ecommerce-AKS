@@ -50,7 +50,6 @@ jobs:
         STORAGE_ACCOUNT=$(echo $STORAGE_ACCOUNT | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER_NAME="tfstate"
 
-        # Only create resource group if it doesn't exist
         if ! az group show -n $RESOURCE_GROUP &>/dev/null; then
           az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
         fi
@@ -109,9 +108,7 @@ jobs:
     - name: Import Existing Resources (if any)
       run: |
         cd terraform
-        # Import VNet if it exists
         terraform import azurerm_virtual_network.vnet /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet || true
-        # Import Subnet if it exists
         terraform import azurerm_subnet.aks_subnet /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet/subnets/${{ env.TF_VAR_resource_group_name }}-aks-subnet || true
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -119,11 +116,10 @@ jobs:
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         ARM_USE_OIDC: true
 
-    - name: Terraform Apply Auto
+    - name: Terraform Apply Auto (NO continue-on-error)
       run: |
         cd terraform
         terraform apply -auto-approve
-      continue-on-error: true
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -138,12 +134,12 @@ jobs:
         echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
         echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
         echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
-      continue-on-error: false
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         ARM_USE_OIDC: true
+
 
   app-deploy:
     name: Build, Push & Deploy App
@@ -171,8 +167,10 @@ jobs:
 
     - name: Build Product Image
       run: |
-        docker build -t ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
-        docker push ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}
+        IMAGE=${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}
+        docker build -t "$IMAGE" ./services/product
+        docker push "$IMAGE"
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
     - name: Attach ACR to AKS
       run: |
@@ -187,12 +185,20 @@ jobs:
         cluster-name: ${{ needs.terraform-infra.outputs.aks_name }}
         resource-group: ${{ needs.terraform-infra.outputs.resource_group }}
 
+    - name: Ensure product-secrets exists
+      run: |
+        kubectl get ns ecomm || kubectl create ns ecomm
+
+        if ! kubectl -n ecomm get secret product-secrets >/dev/null 2>&1; then
+          kubectl -n ecomm create secret generic product-secrets \
+            --from-literal=secret-key="${{ secrets.PRODUCT_SECRET_KEY }}"
+        fi
+
     - name: Install NGINX Ingress Controller
       run: |
         helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
         helm repo update
         
-        # Check if already installed
         if ! helm list -n ingress-nginx | grep -q nginx-ingress; then
           helm install nginx-ingress ingress-nginx/ingress-nginx \
             --namespace ingress-nginx \
@@ -204,16 +210,18 @@ jobs:
     - name: Deploy to AKS
       run: |
         kubectl apply -f k8s/namespace.yaml
-        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}|" k8s/product-deployment.yaml | kubectl apply -f -
+        
+        sed "s|IMAGE_REPLACED_BY_CI|${{ env.IMAGE }}|" k8s/product-deployment.yaml | kubectl apply -f -
+        
         kubectl apply -f k8s/product-service.yaml
         kubectl apply -f k8s/product-hpa.yaml
         kubectl apply -f k8s/product-pdb.yaml
         kubectl apply -f k8s/ingress.yaml
 
-    - name: Wait for Pods to be Ready
+    - name: Wait & Rollout Status
       run: |
-        echo "Waiting for pods to be ready..."
-        kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
+        kubectl -n ecomm rollout status deployment/product --timeout=180s
+        kubectl -n ecomm wait --for=condition=ready pod -l app=product --timeout=300s || true
 
     - name: Get Ingress External IP
       run: |
@@ -221,37 +229,23 @@ jobs:
         for i in {1..30}; do
           EXTERNAL_IP=$(kubectl get svc nginx-ingress-ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
           if [ -n "$EXTERNAL_IP" ]; then
-            echo "✅ Load Balancer IP assigned: $EXTERNAL_IP"
             echo "INGRESS_IP=$EXTERNAL_IP" >> $GITHUB_ENV
-            echo ""
-            echo "=========================================="
-            echo "🌐 YOUR APPLICATION IS NOW ACCESSIBLE AT:"
-            echo "   http://$EXTERNAL_IP"
-            echo "=========================================="
-            echo ""
+            echo "✅ Load Balancer IP assigned: $EXTERNAL_IP"
             break
           fi
           echo "Attempt $i/30: Waiting for external IP..."
           sleep 10
         done
-        
+
         if [ -z "$EXTERNAL_IP" ]; then
-          echo "⚠️  External IP not assigned yet. Check manually with:"
-          echo "   kubectl get svc -n ingress-nginx"
+          echo "⚠️ External IP not assigned yet."
+          kubectl get svc -n ingress-nginx
+          exit 1
         fi
 
     - name: Display All Service Information
       run: |
-        echo "=== Ingress Controller Service ==="
         kubectl get svc -n ingress-nginx
-        echo ""
-        echo "=== Application Pods ==="
         kubectl get pods -n ecomm
-        echo ""
-        echo "=== Ingress Resources ==="
         kubectl get ingress -n ecomm
-        echo ""
-        echo "=== Application Service ==="
         kubectl get svc -n ecomm
-
-        
