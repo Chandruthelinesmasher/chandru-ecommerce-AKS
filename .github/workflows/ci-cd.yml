@@ -91,10 +91,10 @@ EOF
     runs-on: ubuntu-latest
 
     outputs:
-      acr_name: ${{ steps.out.outputs.acr_name }}
-      acr_login_server: ${{ steps.out.outputs.acr_login_server }}
-      aks_name: ${{ steps.out.outputs.aks_name }}
-      resource_group: ${{ steps.out.outputs.resource_group }}
+      acr_name: ${{ steps.capture.outputs.acr_name }}
+      acr_login_server: ${{ steps.capture.outputs.acr_login_server }}
+      aks_name: ${{ steps.capture.outputs.aks_name }}
+      resource_group: ${{ steps.capture.outputs.resource_group }}
 
     steps:
     - uses: actions/checkout@v4
@@ -132,7 +132,7 @@ EOF
         ARM_USE_OIDC: true
 
     - name: Capture Outputs
-      id: out
+      id: capture
       run: |
         cd terraform
         echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
