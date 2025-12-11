@@ -6,6 +6,7 @@ import json
 import time
 from functools import wraps
 from threading import Event
+from datetime import datetime   # <-- ADDED FOR now()
 
 from flask import Flask, jsonify, request, abort, render_template, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
@@ -16,8 +17,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.exceptions import HTTPException
 
 # ---------------- CONFIG ----------------
-# FIX 1: Use /tmp for writable database path in containers
-DB_DEFAULT = "sqlite:////tmp/product.db"  # Changed from ./product.db
+DB_DEFAULT = "sqlite:////tmp/product.db"  # Required for AKS (container writable path)
 DATABASE_URL = os.environ.get("DATABASE_URL", DB_DEFAULT)
 REDIS_URL = os.environ.get("REDIS_URL")
 SECRET_KEY = os.environ.get("SECRET_KEY", "changeme")
@@ -110,14 +110,12 @@ def init_models(app):
                 "stock": self.stock,
             }
 
-    # FIX 2: Add error handling for database creation
     try:
         with app.app_context():
             db.create_all()
             app.logger.info("Database tables created successfully")
     except Exception as e:
         app.logger.error(f"Database initialization error: {e}")
-        # Don't crash - let health checks handle it
 
     return Product
 
@@ -127,27 +125,18 @@ def create_app(config=None):
     configure_logging()
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-    # FIX 3: Create directories if they don't exist
     template_dir = os.path.join(BASE_DIR, "templates")
     static_dir = os.path.join(BASE_DIR, "static")
-    
-    # Check if directories exist, log warning if not
+
     if not os.path.exists(template_dir):
         logging.warning(f"Template directory not found: {template_dir}")
     if not os.path.exists(static_dir):
         logging.info(f"Static directory not found: {static_dir} (creating)")
         os.makedirs(static_dir, exist_ok=True)
 
-    app = Flask(
-        __name__,
-        template_folder=template_dir,
-        static_folder=static_dir
-    )
-
+    app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
-    # -------- CONFIG ----------
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SECRET_KEY"] = SECRET_KEY
@@ -156,15 +145,13 @@ def create_app(config=None):
     if config:
         app.config.update(config)
 
-    # Log configuration
     app.logger.info(f"Starting app with DATABASE_URL: {DATABASE_URL}")
     app.logger.info(f"Template folder: {template_dir}")
     app.logger.info(f"Static folder: {static_dir}")
 
-    # -------- DB ----------
     Product = init_models(app)
 
-    # -------- REDIS ----------
+    # ---------------- REDIS ----------------
     global redis_client
     if REDIS_URL:
         try:
@@ -177,7 +164,7 @@ def create_app(config=None):
     else:
         app.logger.info("Redis not configured; using in-memory cache")
 
-    # -------- ERROR HANDLER ----------
+    # ---------------- ERROR HANDLER ----------------
     @app.errorhandler(Exception)
     def handle_exception(e):
         app.logger.exception("Unhandled exception")
@@ -186,7 +173,7 @@ def create_app(config=None):
             status = e.code
         return jsonify({"error": str(e)}), status
 
-    # -------- HEALTH CHECKS ----------
+    # ---------------- HEALTH CHECKS ----------------
     @app.route("/health")
     def health():
         try:
@@ -204,12 +191,12 @@ def create_app(config=None):
     def metrics():
         return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
-    # -------- SERVE style.css FROM templates ----------
+    # -------- Serve CSS inside templates folder --------
     @app.route("/templates/<path:filename>")
     def template_static(filename):
         return send_from_directory(template_dir, filename)
 
-    # -------- HOME PAGE ----------
+    # ---------------- HOME PAGE ----------------
     @app.route("/", methods=["GET"])
     @record_metrics("index")
     def index():
@@ -218,16 +205,11 @@ def create_app(config=None):
         q = request.args.get("q", "").strip()
 
         query = Product.query
-
         if q:
             like = f"%{q}%"
             query = query.filter(or_(Product.title.ilike(like), Product.description.ilike(like)))
 
-        pag = query.order_by(Product.created_at.desc()).paginate(
-            page=page,
-            per_page=per_page,
-            error_out=False
-        )
+        pag = query.order_by(Product.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
 
         return render_template(
             "index.html",
@@ -235,21 +217,21 @@ def create_app(config=None):
             page=page,
             pages=pag.pages,
             q=q,
-            version=APP_VERSION
+            version=APP_VERSION,
         )
 
-    # -------- PRODUCT PAGE ----------
+    # ---------------- PRODUCT PAGE ----------------
     @app.route("/product/<int:product_id>")
     def product_page(product_id):
         p = Product.query.get_or_404(product_id)
         return render_template("product.html", product=p.to_dict())
 
-    # -------- API ----------
+    # ---------------- API ----------------
     @app.route("/api/products")
     def api_products():
         return jsonify([p.to_dict() for p in Product.query.all()])
 
-    # -------- ADMIN SEED ----------
+    # ---------------- SEED SAMPLE DATA ----------------
     @app.route("/admin/seed", methods=["POST"])
     def admin_seed():
         sample = [
@@ -266,7 +248,12 @@ def create_app(config=None):
         db.session.commit()
         return jsonify({"status": "seeded"}), 201
 
-    # -------- SHUTDOWN ----------
+    # ---------------- TEMPLATE GLOBALS: FIXES now() ----------------
+    @app.context_processor
+    def inject_now():
+        return {"now": datetime.utcnow}
+
+    # ---------------- SHUTDOWN HANDLERS ----------------
     def handle_sigterm(signum, frame):
         app.logger.info("Shutdown signal received")
         shutdown_event.set()
@@ -280,7 +267,6 @@ def create_app(config=None):
 # ---------------- LOCAL RUN ----------------
 if __name__ == "__main__":
     app = create_app()
-    # FIX 4: Default to port 8000 for consistency
     port = int(os.environ.get("PORT", 8000))
     app.logger.info(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
