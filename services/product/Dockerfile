@@ -29,7 +29,6 @@ ENV APP_VERSION="v1.0.0"
 EXPOSE 8000
 
 # ---------- RUN APPLICATION ----------
-# For Flask inside Gunicorn:
-#  app:app = filename:flask_app_variable
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:create_app()", "--workers", "2", "--timeout", "60"]
-
+# For Flask with application factory pattern
+# Using --factory flag to tell Gunicorn that create_app() is a factory function
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--factory", "app:create_app", "--workers", "2", "--timeout", "60"]
