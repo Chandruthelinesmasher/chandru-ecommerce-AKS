@@ -1,0 +1,105 @@
+name: Destroy Infra (Manual Approval Required)
+
+on:
+  workflow_dispatch:   # <-- This ensures the workflow runs ONLY when triggered manually
+    inputs:
+      confirm_destroy:
+        description: "Type YES to confirm destruction of ALL Azure resources"
+        required: true
+        default: "NO"
+
+env:
+  TF_VAR_location: "eastus"
+  TF_VAR_resource_group_name: "rg-chandru-ecomm"
+
+jobs:
+
+  approve-and-destroy:
+    name: "⚠️ Destroy Terraform Infrastructure"
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    if: ${{ github.event.inputs.confirm_destroy == 'YES' }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ------------ Login to Azure via OIDC ------------ #
+    - name: Login to Azure using OIDC
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        enable-AzPSSession: false
+
+    - name: Verify Azure Login
+      run: |
+        echo "Logged in successfully"
+        az account show
+
+    # ------------ Retrieve state storage account name ------------ #
+    # Same logic used in your deployment workflow
+    - name: Locate Terraform Remote State Storage
+      run: |
+        RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
+
+        # Get storage account dynamically (matches tf-state naming pattern)
+        STORAGE_ACCOUNT=$(az storage account list \
+          --resource-group $RESOURCE_GROUP \
+          --query "[?contains(name,'tf')].name" -o tsv)
+
+        echo "Using storage account: $STORAGE_ACCOUNT"
+        echo "STORAGE_ACCOUNT=$STORAGE_ACCOUNT" >> $GITHUB_ENV
+        echo "CONTAINER_NAME=tfstate" >> $GITHUB_ENV
+
+    # ------------ Install Terraform ------------ #
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.9.0"
+
+    # ------------ Create Backend File ------------ #
+    - name: Setup Terraform Backend
+      run: |
+        cat > terraform/backend.tf <<EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ env.STORAGE_ACCOUNT }}"
+            container_name       = "tfstate"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
+
+    # ------------ Terraform Init ------------ #
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+
+    # ------------ Terraform Destroy ------------ #
+    - name: Terraform Destroy (Manual Approval Completed)
+      run: |
+        cd terraform
+        terraform destroy -auto-approve
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Cleanup Verification
+      run: |
+        echo "Checking if resource group still exists..."
+        az group show -n ${{ env.TF_VAR_resource_group_name }} || echo "Resource group removed successfully."
