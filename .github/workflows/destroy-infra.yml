@@ -7,11 +7,21 @@ on:
         description: "Type YES to confirm deleting ALL infrastructure"
         required: true
         default: "NO"
+      delete_backend:
+        description: "Also delete Terraform state storage? (YES/NO)"
+        required: true
+        default: "NO"
 
 env:
   TF_VAR_location: "eastus"
   TF_VAR_resource_group_name: "rg-chandru-ecomm"
+  TF_VAR_node_vm_size: "Standard_DC2s_v3"
+  TF_VAR_node_count: 2
   TF_LOG: INFO
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
 
@@ -19,32 +29,49 @@ jobs:
   # STAGE 1 — VALIDATE APPROVAL
   ###############################################################
   validate:
-    name: Validate User Input
+    name: "Stage 1: Validate User Input"
     runs-on: ubuntu-latest
 
     steps:
-    - name: Check Approval
+    - name: Check Destroy Confirmation
       run: |
+        echo "=== Validating User Input ==="
         if [ "${{ github.event.inputs.confirm_destroy }}" != "YES" ]; then
-          echo "❌ Confirmation failed. You must type YES to destroy."
+          echo "❌ Confirmation failed. You must type 'YES' to destroy infrastructure."
+          echo "   Current input: ${{ github.event.inputs.confirm_destroy }}"
           exit 1
         fi
-        echo "✅ Destroy confirmed. Proceeding..."
+        echo "✅ Destroy confirmed. Proceeding with infrastructure destruction..."
+        echo ""
+        echo "⚠️  WARNING: This will delete:"
+        echo "   - AKS Cluster"
+        echo "   - Azure Container Registry"
+        echo "   - All Kubernetes workloads"
+        echo "   - Virtual Networks"
+        echo "   - All associated resources"
+
+    - name: Display Destroy Scope
+      run: |
+        echo "=== Destroy Scope ==="
+        echo "Resource Group: ${{ env.TF_VAR_resource_group_name }}"
+        echo "Location: ${{ env.TF_VAR_location }}"
+        echo "Delete Backend Storage: ${{ github.event.inputs.delete_backend }}"
 
   ###############################################################
   # STAGE 2 — LOGIN + SETUP BACKEND
   ###############################################################
   setup:
-    name: Setup Terraform Backend
+    name: "Stage 2: Setup Terraform Backend"
     needs: validate
     runs-on: ubuntu-latest
 
     outputs:
-      storage: ${{ steps.b.outputs.storage }}
-      container: ${{ steps.b.outputs.container }}
+      storage: ${{ steps.backend.outputs.storage }}
+      container: ${{ steps.backend.outputs.container }}
+      backend_exists: ${{ steps.backend.outputs.backend_exists }}
 
     steps:
-    - name: Checkout repository
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Azure Login (OIDC)
@@ -54,33 +81,80 @@ jobs:
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Read Storage Account + Container from backend.tf
-      id: b
+    - name: Detect Backend Configuration
+      id: backend
       run: |
-        STORAGE=$(grep "storage_account_name" terraform/backend.tf | awk -F '"' '{print $2}')
-        CONTAINER=$(grep "container_name" terraform/backend.tf | awk -F '"' '{print $2}')
-
+        echo "=== Detecting Terraform Backend ==="
+        
+        # Try to read from backend.tf if it exists
+        if [ -f terraform/backend.tf ]; then
+          echo "Found terraform/backend.tf"
+          STORAGE=$(grep "storage_account_name" terraform/backend.tf | awk -F '"' '{print $2}' || echo "tfstatechandru")
+          CONTAINER=$(grep "container_name" terraform/backend.tf | awk -F '"' '{print $2}' || echo "tfstate")
+        else
+          echo "No backend.tf found, using defaults"
+          STORAGE="tfstatechandru"
+          CONTAINER="tfstate"
+        fi
+        
+        echo "Storage Account: $STORAGE"
+        echo "Container: $CONTAINER"
+        
+        # Check if storage account exists
+        if az storage account show -n "$STORAGE" -g "${{ env.TF_VAR_resource_group_name }}" &>/dev/null; then
+          echo "✅ Backend storage exists"
+          BACKEND_EXISTS="true"
+        else
+          echo "⚠️  Backend storage not found"
+          BACKEND_EXISTS="false"
+        fi
+        
         echo "storage=$STORAGE" >> $GITHUB_OUTPUT
         echo "container=$CONTAINER" >> $GITHUB_OUTPUT
-
-        echo "Using storage: $STORAGE"
-        echo "Using container: $CONTAINER"
+        echo "backend_exists=$BACKEND_EXISTS" >> $GITHUB_OUTPUT
 
   ###############################################################
   # STAGE 3 — TERRAFORM INIT
   ###############################################################
   init:
-    name: Terraform Init
+    name: "Stage 3: Terraform Init"
     needs: setup
     runs-on: ubuntu-latest
+    if: needs.setup.outputs.backend_exists == 'true'
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Azure Login (OIDC)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.9.0"
+        terraform_version: 1.9.0
+        terraform_wrapper: false
+
+    - name: Create Backend Config
+      run: |
+        mkdir -p terraform
+        cat > terraform/backend.tf << 'EOF'
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ needs.setup.outputs.storage }}"
+            container_name       = "${{ needs.setup.outputs.container }}"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
+        
+        echo "=== Backend Configuration ==="
+        cat terraform/backend.tf
 
     - name: Terraform Init
       run: |
@@ -92,28 +166,11 @@ jobs:
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
-  ###############################################################
-  # STAGE 4 — TERRAFORM DESTROY
-  ###############################################################
-  destroy:
-    name: Destroy All Resources
-    needs: init
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Login to Azure
-      uses: azure/login@v2
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    - name: Terraform Destroy
+    - name: Show Current State
       run: |
         cd terraform
-        terraform destroy -auto-approve
+        echo "=== Current Terraform State ==="
+        terraform state list || echo "No state found"
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -121,12 +178,99 @@ jobs:
         ARM_USE_OIDC: true
 
   ###############################################################
-  # STAGE 5 — CLEANUP CHECK
+  # STAGE 4 — TERRAFORM DESTROY
   ###############################################################
-  cleanup:
-    name: Verify Cleanup
+  destroy:
+    name: "Stage 4: Destroy Infrastructure"
+    needs: [setup, init]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.backend_exists == 'true'
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Azure Login (OIDC)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.9.0
+        terraform_wrapper: false
+
+    - name: Create Backend Config
+      run: |
+        mkdir -p terraform
+        cat > terraform/backend.tf << 'EOF'
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+            storage_account_name = "${{ needs.setup.outputs.storage }}"
+            container_name       = "${{ needs.setup.outputs.container }}"
+            key                  = "terraform.tfstate"
+          }
+        }
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Terraform Destroy Plan
+      run: |
+        cd terraform
+        echo "=== Creating Destroy Plan ==="
+        terraform plan -destroy -out=destroy.tfplan
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Terraform Destroy
+      run: |
+        cd terraform
+        echo "=== Destroying Infrastructure ==="
+        terraform apply -auto-approve destroy.tfplan
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Verify Resources Destroyed
+      run: |
+        echo "=== Checking for remaining resources ==="
+        
+        # List any remaining resources in the resource group
+        RESOURCES=$(az resource list -g ${{ env.TF_VAR_resource_group_name }} --query "[].{Name:name, Type:type}" -o table 2>/dev/null || echo "")
+        
+        if [ -z "$RESOURCES" ]; then
+          echo "✅ All managed resources destroyed"
+        else
+          echo "⚠️  Some resources may still exist:"
+          echo "$RESOURCES"
+        fi
+
+  ###############################################################
+  # STAGE 5 — CLEANUP RESOURCE GROUP (Optional)
+  ###############################################################
+  cleanup_resource_group:
+    name: "Stage 5: Cleanup Resource Group"
     needs: destroy
     runs-on: ubuntu-latest
+    if: always()
 
     steps:
     - name: Azure Login
@@ -136,10 +280,110 @@ jobs:
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Check If Resource Group Still Exists
+    - name: Check Resource Group Status
+      id: rg_check
       run: |
+        echo "=== Checking Resource Group Status ==="
+        
         if az group exists -n ${{ env.TF_VAR_resource_group_name }}; then
-          echo "⚠️ Resource group still exists. Manual cleanup may be required."
+          echo "Resource group still exists"
+          echo "exists=true" >> $GITHUB_OUTPUT
+          
+          # Count remaining resources
+          RESOURCE_COUNT=$(az resource list -g ${{ env.TF_VAR_resource_group_name }} --query "length(@)" -o tsv)
+          echo "Remaining resources: $RESOURCE_COUNT"
+          echo "count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
         else
-          echo "🎉 All resources successfully destroyed!"
+          echo "✅ Resource group has been deleted"
+          echo "exists=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: List Remaining Resources
+      if: steps.rg_check.outputs.exists == 'true' && steps.rg_check.outputs.count != '0'
+      run: |
+        echo "=== Remaining Resources ==="
+        az resource list -g ${{ env.TF_VAR_resource_group_name }} \
+          --query "[].{Name:name, Type:type, Location:location}" \
+          -o table
+
+    - name: Force Delete Resource Group (if requested)
+      if: steps.rg_check.outputs.exists == 'true'
+      run: |
+        echo "⚠️  Resource group still contains resources"
+        echo "Manual cleanup may be required, or you can force delete:"
+        echo ""
+        echo "To force delete everything, run:"
+        echo "  az group delete -n ${{ env.TF_VAR_resource_group_name }} --yes --no-wait"
+
+  ###############################################################
+  # STAGE 6 — DELETE BACKEND STORAGE (Optional)
+  ###############################################################
+  delete_backend:
+    name: "Stage 6: Delete Backend Storage"
+    needs: [setup, destroy]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.delete_backend == 'YES' && needs.setup.outputs.backend_exists == 'true'
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Delete Terraform State Storage
+      run: |
+        echo "=== Deleting Terraform Backend Storage ==="
+        
+        STORAGE="${{ needs.setup.outputs.storage }}"
+        CONTAINER="${{ needs.setup.outputs.container }}"
+        RG="${{ env.TF_VAR_resource_group_name }}"
+        
+        # Delete container
+        if az storage container exists --name "$CONTAINER" --account-name "$STORAGE" &>/dev/null; then
+          echo "Deleting container: $CONTAINER"
+          az storage container delete --name "$CONTAINER" --account-name "$STORAGE" --auth-mode login
+        fi
+        
+        # Delete storage account
+        if az storage account show -n "$STORAGE" -g "$RG" &>/dev/null; then
+          echo "Deleting storage account: $STORAGE"
+          az storage account delete -n "$STORAGE" -g "$RG" --yes
+        fi
+        
+        echo "✅ Backend storage deleted"
+
+  ###############################################################
+  # FINAL SUMMARY
+  ###############################################################
+  summary:
+    name: "Destruction Summary"
+    needs: [destroy, cleanup_resource_group, delete_backend]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Display Summary
+      run: |
+        echo "=============================================="
+        echo "     INFRASTRUCTURE DESTRUCTION COMPLETE"
+        echo "=============================================="
+        echo ""
+        echo "Destroy Job: ${{ needs.destroy.result }}"
+        echo "Cleanup Job: ${{ needs.cleanup_resource_group.result }}"
+        echo "Backend Deletion: ${{ needs.delete_backend.result }}"
+        echo ""
+        echo "Resource Group: ${{ env.TF_VAR_resource_group_name }}"
+        echo ""
+        
+        if [ "${{ needs.destroy.result }}" == "success" ]; then
+          echo "✅ Infrastructure successfully destroyed"
+        else
+          echo "⚠️  Infrastructure destruction encountered issues"
+          echo "Please check the logs above for details"
+        fi
+        
+        echo ""
+        echo "To verify everything is gone, run:"
+        echo "  az group show -n ${{ env.TF_VAR_resource_group_name }}"
