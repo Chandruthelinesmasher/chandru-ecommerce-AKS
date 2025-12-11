@@ -1,4 +1,4 @@
-name: Full Infra + App Deployment (Automatic + No Manual Terraform)
+name: Full Infra + App Deployment (No Manual Terraform)
 
 on:
   push:
@@ -7,8 +7,13 @@ on:
 env:
   TF_VAR_location: "eastus"
   TF_VAR_resource_group_name: "rg-chandru-ecomm"
-  TF_VAR_node_vm_size: "Standard_DS2_v2"
+  TF_VAR_node_vm_size: "Standard_D2s_v3"
+  TF_VAR_node_count: 2
   TF_LOG: INFO
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
 
@@ -18,15 +23,10 @@ jobs:
   setup:
     name: "Stage 1: Checkout & Backend Setup"
     runs-on: ubuntu-latest
-    
-    # Add permissions at job level
-    permissions:
-      id-token: write
-      contents: read
 
     outputs:
-      storage_account: ${{ steps.backend.outputs.storage }}
-      container_name: ${{ steps.backend.outputs.container }}
+      storage: ${{ steps.backend.outputs.storage }}
+      container: ${{ steps.backend.outputs.container }}
 
     steps:
     - name: Checkout Repo
@@ -47,19 +47,14 @@ jobs:
         STORAGE=$(echo $STORAGE | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER="tfstate"
 
-        # Create RG if missing
-        if ! az group show -n $RESOURCE_GROUP &>/dev/null; then
-          az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
-        fi
+        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
 
-        # Create Storage Account
         az storage account create \
           -n $STORAGE \
           -g $RESOURCE_GROUP \
           -l ${{ env.TF_VAR_location }} \
           --sku Standard_LRS
 
-        # Create Container
         az storage container create \
           --name $CONTAINER \
           --account-name $STORAGE
@@ -69,59 +64,53 @@ jobs:
 
     - name: Write Backend File
       run: |
+        mkdir -p terraform
         cat > terraform/backend.tf <<EOF
-        terraform {
-          backend "azurerm" {
-            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-            storage_account_name = "${{ steps.backend.outputs.storage }}"
-            container_name       = "${{ steps.backend.outputs.container }}"
-            key                  = "terraform.tfstate"
-          }
-        }
-        EOF
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+    storage_account_name = "${{ steps.backend.outputs.storage }}"
+    container_name       = "${{ steps.backend.outputs.container }}"
+    key                  = "terraform.tfstate"
+  }
+}
+EOF
 
     - name: Upload Backend File
       uses: actions/upload-artifact@v4
       with:
-        name: backend-config
+        name: backend
         path: terraform/backend.tf
 
   #########################################################
-  # STAGE 2 — TERRAFORM INIT + IMPORT + APPLY
+  # STAGE 2 — TERRAFORM INIT + APPLY
   #########################################################
   terraform:
     name: "Stage 2: Terraform Apply Infra"
     needs: setup
     runs-on: ubuntu-latest
-    
-    # Add permissions at job level
-    permissions:
-      id-token: write
-      contents: read
 
     outputs:
-      acr_name: ${{ steps.outputs.outputs.acr_name }}
-      acr_login_server: ${{ steps.outputs.outputs.acr_login_server }}
-      aks_name: ${{ steps.outputs.outputs.aks_name }}
-      resource_group: ${{ steps.outputs.outputs.resource_group }}
+      acr_name: ${{ steps.out.outputs.acr_name }}
+      acr_login_server: ${{ steps.out.outputs.acr_login_server }}
+      aks_name: ${{ steps.out.outputs.aks_name }}
+      resource_group: ${{ steps.out.outputs.resource_group }}
 
     steps:
-    - name: Checkout Repo
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Download Backend Config
-      uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v4
       with:
-        name: backend-config
+        name: backend
         path: terraform/
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.9.0"
+        terraform_version: 1.9.0
         terraform_wrapper: false
 
-    - name: Login to Azure (OIDC)
+    - name: Azure Login (OIDC)
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -133,34 +122,6 @@ jobs:
         cd terraform
         terraform init
       env:
-        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        ARM_USE_OIDC: true
-
-    - name: Import Resource Group
-      run: |
-        cd terraform
-        terraform import azurerm_resource_group.rg \
-          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }} || true
-      env:
-        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        ARM_USE_OIDC: true
-
-    - name: Import VNet + Subnet
-      run: |
-        cd terraform
-        terraform import azurerm_virtual_network.vnet \
-          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet || true
-
-        terraform import azurerm_subnet.aks_subnet \
-          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet/subnets/${{ env.TF_VAR_resource_group_name }}-aks-subnet || true
-      env:
-        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
     - name: Terraform Apply
@@ -168,38 +129,29 @@ jobs:
         cd terraform
         terraform apply -auto-approve
       env:
-        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
-    - name: Capture Terraform Outputs
-      id: outputs
+    - name: Capture Outputs
+      id: out
       run: |
         cd terraform
-        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
         echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
+        echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
         echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
         echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
 
   #########################################################
-  # STAGE 3 — ACR BUILD + PUSH
+  # STAGE 3 — BUILD & PUSH IMAGE TO ACR
   #########################################################
   build:
     name: "Stage 3: Build & Push Docker Image"
     needs: terraform
     runs-on: ubuntu-latest
-    
-    # Add permissions at job level
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
-    - name: Checkout Repo
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Login to Azure
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -209,7 +161,7 @@ jobs:
     - name: ACR Login
       run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
 
-    - name: Build & Push Image
+    - name: Build & Push Container
       run: |
         docker build -t ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
         docker push ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}
@@ -221,17 +173,11 @@ jobs:
     name: "Stage 4: Deploy to AKS"
     needs: [terraform, build]
     runs-on: ubuntu-latest
-    
-    # Add permissions at job level
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
-    - name: Checkout Repo
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Login to Azure
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -248,16 +194,16 @@ jobs:
       run: |
         helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
         helm repo update
-
-        helm upgrade --install nginx-ingress ingress-nginx/ingress-nginx \
+        helm upgrade --install nginx ingress-nginx/ingress-nginx \
           --namespace ingress-nginx \
           --create-namespace \
           --wait --timeout 5m
 
-    - name: Deploy Kubernetes Manifests
+    - name: Deploy App
       run: |
         kubectl apply -f k8s/namespace.yaml
-        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}|" k8s/product-deployment.yaml | kubectl apply -f -
+        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}|" \
+          k8s/product-deployment.yaml | kubectl apply -f -
         kubectl apply -f k8s/product-service.yaml
         kubectl apply -f k8s/product-hpa.yaml
         kubectl apply -f k8s/product-pdb.yaml
@@ -270,14 +216,9 @@ jobs:
     name: "Stage 5: Verify Deployment"
     needs: [terraform, deploy]
     runs-on: ubuntu-latest
-    
-    # Add permissions at job level
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
-    - name: Login to Azure
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -290,11 +231,10 @@ jobs:
         cluster-name: ${{ needs.terraform.outputs.aks_name }}
         resource-group: ${{ needs.terraform.outputs.resource_group }}
 
-    - name: Wait for Pods
+    - name: Verify Pods
       run: |
         kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
 
-    - name: Show Ingress IP
+    - name: Show Endpoint
       run: |
-        kubectl get svc -n ingress-nginx
         kubectl get ingress -n ecomm
