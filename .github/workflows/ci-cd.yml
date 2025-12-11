@@ -3,6 +3,7 @@ name: Full Infra + App Deployment (No Manual Terraform)
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:  # Allow manual triggering for testing
 
 env:
   TF_VAR_location: "eastus"
@@ -43,7 +44,6 @@ jobs:
       id: backend
       run: |
         RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
-        # Use a consistent storage account name based on resource group
         STORAGE="tfstatechandru"
         CONTAINER="tfstate"
 
@@ -152,10 +152,9 @@ jobs:
     - name: Import Existing Resource Group
       run: |
         cd terraform
-        # Check if resource group exists in state
         if ! terraform state show azurerm_resource_group.rg &>/dev/null; then
           echo "Importing existing resource group into Terraform state..."
-          terraform import azurerm_resource_group.rg /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}
+          terraform import azurerm_resource_group.rg /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }} || true
         else
           echo "Resource group already in Terraform state"
         fi
@@ -166,10 +165,42 @@ jobs:
         ARM_USE_OIDC: true
       continue-on-error: true
 
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -out=tfplan
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
     - name: Terraform Apply
       run: |
         cd terraform
-        terraform apply -auto-approve
+        terraform apply -auto-approve tfplan
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Debug - Show Terraform State
+      run: |
+        cd terraform
+        echo "=== Terraform State List ==="
+        terraform state list
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Debug - Show All Outputs (JSON)
+      run: |
+        cd terraform
+        echo "=== All Terraform Outputs (JSON) ==="
+        terraform output -json | jq .
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -180,33 +211,71 @@ jobs:
       id: capture
       run: |
         cd terraform
-        ACR_NAME=$(terraform output -raw acr_name 2>/dev/null || echo "")
-        ACR_LOGIN=$(terraform output -raw acr_login_server 2>/dev/null || echo "")
-        AKS_NAME=$(terraform output -raw aks_name 2>/dev/null || echo "")
-        RG_NAME=$(terraform output -raw resource_group 2>/dev/null || echo "")
         
-        echo "Captured values:"
-        echo "ACR Name: $ACR_NAME"
-        echo "ACR Login Server: $ACR_LOGIN"
-        echo "AKS Name: $AKS_NAME"
-        echo "Resource Group: $RG_NAME"
+        # Capture with better error handling
+        set -e  # Exit on any error
         
-        if [ -z "$ACR_NAME" ] || [ -z "$ACR_LOGIN" ] || [ -z "$AKS_NAME" ] || [ -z "$RG_NAME" ]; then
-          echo "ERROR: One or more Terraform outputs are empty!"
-          echo "Available outputs:"
-          terraform output
+        echo "=== Extracting Terraform Outputs ==="
+        
+        # Use terraform output -json for more reliable parsing
+        OUTPUTS=$(terraform output -json)
+        
+        ACR_NAME=$(echo "$OUTPUTS" | jq -r '.acr_name.value // empty')
+        ACR_LOGIN=$(echo "$OUTPUTS" | jq -r '.acr_login_server.value // empty')
+        AKS_NAME=$(echo "$OUTPUTS" | jq -r '.aks_name.value // empty')
+        RG_NAME=$(echo "$OUTPUTS" | jq -r '.resource_group.value // empty')
+        
+        echo "Extracted values:"
+        echo "  ACR Name: [$ACR_NAME]"
+        echo "  ACR Login Server: [$ACR_LOGIN]"
+        echo "  AKS Name: [$AKS_NAME]"
+        echo "  Resource Group: [$RG_NAME]"
+        
+        # Validate all outputs are present
+        if [ -z "$ACR_NAME" ]; then
+          echo "ERROR: acr_name is empty!"
+          echo "Full outputs JSON:"
+          echo "$OUTPUTS" | jq .
           exit 1
         fi
         
-        echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
-        echo "acr_login_server=$ACR_LOGIN" >> $GITHUB_OUTPUT
-        echo "aks_name=$AKS_NAME" >> $GITHUB_OUTPUT
-        echo "resource_group=$RG_NAME" >> $GITHUB_OUTPUT
+        if [ -z "$ACR_LOGIN" ]; then
+          echo "ERROR: acr_login_server is empty!"
+          exit 1
+        fi
+        
+        if [ -z "$AKS_NAME" ]; then
+          echo "ERROR: aks_name is empty!"
+          exit 1
+        fi
+        
+        if [ -z "$RG_NAME" ]; then
+          echo "ERROR: resource_group is empty!"
+          exit 1
+        fi
+        
+        # Write to GitHub outputs
+        {
+          echo "acr_name=$ACR_NAME"
+          echo "acr_login_server=$ACR_LOGIN"
+          echo "aks_name=$AKS_NAME"
+          echo "resource_group=$RG_NAME"
+        } >> $GITHUB_OUTPUT
+        
+        echo "=== ✅ All outputs captured successfully ==="
       env:
         ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
+
+    - name: Verify Outputs Were Set
+      run: |
+        echo "=== Verifying GitHub Outputs ==="
+        echo "ACR Name: ${{ steps.capture.outputs.acr_name }}"
+        echo "ACR Login: ${{ steps.capture.outputs.acr_login_server }}"
+        echo "AKS Name: ${{ steps.capture.outputs.aks_name }}"
+        echo "Resource Group: ${{ steps.capture.outputs.resource_group }}"
 
 
 
@@ -228,14 +297,27 @@ jobs:
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Verify ACR Name
+    - name: Debug - Show Received Outputs
+      run: |
+        echo "=== Outputs Received from Terraform Job ==="
+        echo "ACR Name: [${{ needs.terraform.outputs.acr_name }}]"
+        echo "ACR Login Server: [${{ needs.terraform.outputs.acr_login_server }}]"
+        echo "AKS Name: [${{ needs.terraform.outputs.aks_name }}]"
+        echo "Resource Group: [${{ needs.terraform.outputs.resource_group }}]"
+
+    - name: Validate Outputs
       run: |
         if [ -z "${{ needs.terraform.outputs.acr_name }}" ]; then
-          echo "ERROR: ACR name is empty!"
+          echo "❌ ERROR: ACR name is empty!"
           exit 1
         fi
-        echo "ACR Name: ${{ needs.terraform.outputs.acr_name }}"
-        echo "ACR Login Server: ${{ needs.terraform.outputs.acr_login_server }}"
+        
+        if [ -z "${{ needs.terraform.outputs.acr_login_server }}" ]; then
+          echo "❌ ERROR: ACR login server is empty!"
+          exit 1
+        fi
+        
+        echo "✅ All required outputs are present"
 
     - name: Attach ACR to AKS
       run: |
@@ -250,8 +332,21 @@ jobs:
 
     - name: Build & Push Image
       run: |
-        docker build -t ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
-        docker push ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}
+        IMAGE_TAG="${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}"
+        IMAGE_LATEST="${{ needs.terraform.outputs.acr_login_server }}/product:latest"
+        
+        echo "=== Building Docker Image ==="
+        echo "Image with SHA: $IMAGE_TAG"
+        echo "Image latest: $IMAGE_LATEST"
+        
+        docker build -t "$IMAGE_TAG" ./services/product
+        docker tag "$IMAGE_TAG" "$IMAGE_LATEST"
+        
+        echo "=== Pushing Docker Images ==="
+        docker push "$IMAGE_TAG"
+        docker push "$IMAGE_LATEST"
+        
+        echo "✅ Images pushed successfully"
 
 
 
@@ -288,15 +383,34 @@ jobs:
           --create-namespace \
           --wait --timeout 5m
 
-    - name: Deploy App
+    - name: Deploy Application
       run: |
+        FULL_IMAGE="${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}"
+        
+        echo "=== Deploying Application ==="
+        echo "Full image path: $FULL_IMAGE"
+        
+        # Apply namespace first
         kubectl apply -f k8s/namespace.yaml
-        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}|" \
-          k8s/product-deployment.yaml | kubectl apply -f -
+        
+        # Show the YAML before sed replacement
+        echo "=== Original deployment YAML (first 40 lines) ==="
+        head -40 k8s/product-deployment.yaml
+        
+        # Show the YAML after sed replacement
+        echo "=== Deployment YAML after image replacement (first 40 lines) ==="
+        sed "s|IMAGE_REPLACED_BY_CI|$FULL_IMAGE|g" k8s/product-deployment.yaml | head -40
+        
+        # Apply the deployment with image replacement
+        sed "s|IMAGE_REPLACED_BY_CI|$FULL_IMAGE|g" k8s/product-deployment.yaml | kubectl apply -f -
+        
+        # Apply other Kubernetes resources
         kubectl apply -f k8s/product-service.yaml
         kubectl apply -f k8s/product-hpa.yaml
         kubectl apply -f k8s/product-pdb.yaml
         kubectl apply -f k8s/ingress.yaml
+        
+        echo "✅ Deployment manifests applied successfully"
 
 
 
@@ -322,9 +436,68 @@ jobs:
         cluster-name: ${{ needs.terraform.outputs.aks_name }}
         resource-group: ${{ needs.terraform.outputs.resource_group }}
 
-    - name: Verify Pods
+    - name: Check Deployment Configuration
       run: |
-        kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
+        echo "=== Deployment Configuration ==="
+        kubectl get deployment product -n ecomm -o yaml | grep -A 5 "image:"
+        
+        echo ""
+        echo "=== Deployment Status ==="
+        kubectl get deployments -n ecomm
+        kubectl describe deployment product -n ecomm
 
-    - name: Show Ingress Endpoint
-      run: kubectl get ingress -n ecomm
+    - name: Check Pod Status
+      run: |
+        echo "=== Pod Status ==="
+        kubectl get pods -n ecomm -l app=product -o wide
+        
+        echo ""
+        echo "=== Pod Details ==="
+        kubectl describe pods -n ecomm -l app=product
+
+    - name: Wait for Pods to be Ready
+      run: |
+        echo "=== Waiting for pods to be ready (timeout: 5 minutes) ==="
+        if ! kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s; then
+          echo "❌ Pods failed to become ready within timeout"
+          echo ""
+          echo "=== Pod Events ==="
+          kubectl get events -n ecomm --sort-by='.lastTimestamp'
+          echo ""
+          echo "=== Pod Logs ==="
+          kubectl logs -n ecomm -l app=product --tail=100 --all-containers=true || true
+          exit 1
+        fi
+        
+        echo "✅ All pods are ready"
+
+    - name: Show Service and Ingress
+      run: |
+        echo "=== Services ==="
+        kubectl get svc -n ecomm
+        
+        echo ""
+        echo "=== Ingress ==="
+        kubectl get ingress -n ecomm
+        kubectl describe ingress -n ecomm
+
+    - name: Final Status Summary
+      run: |
+        echo "=== 🎉 DEPLOYMENT SUMMARY ==="
+        echo ""
+        echo "Deployed Image: ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}"
+        echo ""
+        echo "Pods:"
+        kubectl get pods -n ecomm -l app=product
+        echo ""
+        echo "Service:"
+        kubectl get svc -n ecomm product
+        echo ""
+        echo "Ingress:"
+        INGRESS_IP=$(kubectl get ingress -n ecomm product-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+        echo "Ingress IP: $INGRESS_IP"
+        if [ "$INGRESS_IP" != "pending" ] && [ -n "$INGRESS_IP" ]; then
+          echo "Access your application at: http://$INGRESS_IP"
+        else
+          echo "Ingress IP is still being assigned. Check back in a few minutes."
+        fi
