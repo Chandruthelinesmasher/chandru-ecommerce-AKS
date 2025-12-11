@@ -29,7 +29,6 @@ jobs:
       container: ${{ steps.backend.outputs.container }}
 
     steps:
-
     - name: Checkout Repo
       uses: actions/checkout@v4
 
@@ -43,17 +42,17 @@ jobs:
     - name: Create Terraform Backend
       id: backend
       run: |
-        RESOURCE_GROUP="${{ env.TF_VAR_resource_group_name }}"
+        RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
         STORAGE="tf${GITHUB_RUN_ID}state"
         STORAGE=$(echo "$STORAGE" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER="tfstate"
 
-        az group create -n "$RESOURCE_GROUP" -l "${{ env.TF_VAR_location }}" --tags project=chandru-ecomm
+        az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
 
         az storage account create \
           -n "$STORAGE" \
           -g "$RESOURCE_GROUP" \
-          -l "${{ env.TF_VAR_location }}" \
+          -l ${{ env.TF_VAR_location }} \
           --sku Standard_LRS
 
         az storage container create \
@@ -67,21 +66,23 @@ jobs:
       run: |
         mkdir -p terraform
         cat > terraform/backend.tf <<EOF
-        terraform {
-          backend "azurerm" {
-            resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-            storage_account_name = "${{ steps.backend.outputs.storage }}"
-            container_name       = "${{ steps.backend.outputs.container }}"
-            key                  = "terraform.tfstate"
-          }
-        }
-        EOF
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
+    storage_account_name = "${{ steps.backend.outputs.storage }}"
+    container_name       = "${{ steps.backend.outputs.container }}"
+    key                  = "terraform.tfstate"
+  }
+}
+EOF
 
     - name: Upload Backend File
       uses: actions/upload-artifact@v4
       with:
         name: backend
         path: terraform/backend.tf
+
+
 
   #########################################################
   # STAGE 2 — TERRAFORM INIT + APPLY
@@ -98,7 +99,6 @@ jobs:
       resource_group: ${{ steps.capture.outputs.resource_group }}
 
     steps:
-
     - uses: actions/checkout@v4
 
     - uses: actions/download-artifact@v4
@@ -124,6 +124,9 @@ jobs:
         cd terraform
         terraform init
       env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
     - name: Terraform Apply
@@ -131,6 +134,9 @@ jobs:
         cd terraform
         terraform apply -auto-approve
       env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
     - name: Capture Outputs
@@ -142,8 +148,10 @@ jobs:
         echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
         echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
 
+
+
   #########################################################
-  # STAGE 3 — BUILD & PUSH IMAGE TO ACR
+  # STAGE 3 — BUILD & PUSH DOCKER IMAGE
   #########################################################
   build:
     name: "Stage 3: Build & Push Docker Image"
@@ -151,7 +159,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
     - uses: actions/checkout@v4
 
     - name: Azure Login
@@ -164,10 +171,12 @@ jobs:
     - name: ACR Login
       run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
 
-    - name: Build & Push Container
+    - name: Build & Push Image
       run: |
         docker build -t ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
         docker push ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}
+
+
 
   #########################################################
   # STAGE 4 — DEPLOY TO AKS
@@ -178,7 +187,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
     - uses: actions/checkout@v4
 
     - name: Azure Login
@@ -213,6 +221,8 @@ jobs:
         kubectl apply -f k8s/product-pdb.yaml
         kubectl apply -f k8s/ingress.yaml
 
+
+
   #########################################################
   # STAGE 5 — VERIFY DEPLOYMENT
   #########################################################
@@ -222,7 +232,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
     - name: Azure Login
       uses: azure/login@v2
       with:
@@ -240,6 +249,5 @@ jobs:
       run: |
         kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
 
-    - name: Show Endpoint
-      run: |
-        kubectl get ingress -n ecomm
+    - name: Show Ingress Endpoint
+      run: kubectl get ingress -n ecomm
