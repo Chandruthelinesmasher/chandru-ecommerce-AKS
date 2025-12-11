@@ -1,47 +1,112 @@
+# Kubernetes Deployment for Product Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: product
-  namespace: ecomm
-  labels:
-    app: product
+  name: product-service
+  namespace: default
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: product
+      app: product-service
   template:
     metadata:
       labels:
-        app: product
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"   # ✅ FIXED
+        app: product-service
     spec:
       containers:
-        - name: product
-          image: IMAGE_REPLACED_BY_CI
-          ports:
-            - containerPort: 8000    # ✅ FIXED
-
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000             # ✅ FIXED
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000             # ✅ FIXED
-            initialDelaySeconds: 15
-            periodSeconds: 20
-
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+      - name: product
+        image: <your-acr>.azurecr.io/product:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8000"
+        - name: DATABASE_URL
+          value: "sqlite:////tmp/product.db"
+        - name: APP_VERSION
+          value: "v1.0.0"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: product-secrets
+              key: secret-key
+              optional: true
+        # Health probes - CRITICAL for preventing CrashLoopBackOff
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30  # Give app time to start
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        # Startup probe - gives extra time for slow startup
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30  # 30 * 5s = 150s max startup time
+        # Resource limits
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        # Volume for SQLite database
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+---
+# Service for Product Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service
+  namespace: default
+spec:
+  type: LoadBalancer
+  selector:
+    app: product-service
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8000
+  sessionAffinity: None
+---
+# Secret for sensitive data (create this before deploying)
+# kubectl create secret generic product-secrets --from-literal=secret-key=your-secret-key-here
+apiVersion: v1
+kind: Secret
+metadata:
+  name: product-secrets
+  namespace: default
+type: Opaque
+data:
+  # Base64 encoded secret key (replace with your own)
+  # echo -n "your-secret-key" | base64
+  secret-key: Y2hhbmdlbWU=

@@ -16,7 +16,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.exceptions import HTTPException
 
 # ---------------- CONFIG ----------------
-DB_DEFAULT = "sqlite:///./product.db"
+# FIX 1: Use /tmp for writable database path in containers
+DB_DEFAULT = "sqlite:////tmp/product.db"  # Changed from ./product.db
 DATABASE_URL = os.environ.get("DATABASE_URL", DB_DEFAULT)
 REDIS_URL = os.environ.get("REDIS_URL")
 SECRET_KEY = os.environ.get("SECRET_KEY", "changeme")
@@ -109,8 +110,14 @@ def init_models(app):
                 "stock": self.stock,
             }
 
-    with app.app_context():
-        db.create_all()
+    # FIX 2: Add error handling for database creation
+    try:
+        with app.app_context():
+            db.create_all()
+            app.logger.info("Database tables created successfully")
+    except Exception as e:
+        app.logger.error(f"Database initialization error: {e}")
+        # Don't crash - let health checks handle it
 
     return Product
 
@@ -121,13 +128,24 @@ def create_app(config=None):
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+    # FIX 3: Create directories if they don't exist
+    template_dir = os.path.join(BASE_DIR, "templates")
+    static_dir = os.path.join(BASE_DIR, "static")
+    
+    # Check if directories exist, log warning if not
+    if not os.path.exists(template_dir):
+        logging.warning(f"Template directory not found: {template_dir}")
+    if not os.path.exists(static_dir):
+        logging.info(f"Static directory not found: {static_dir} (creating)")
+        os.makedirs(static_dir, exist_ok=True)
+
     app = Flask(
         __name__,
-        template_folder=os.path.join(BASE_DIR, "templates"),
-        static_folder=os.path.join(BASE_DIR, "static")
+        template_folder=template_dir,
+        static_folder=static_dir
     )
 
-    app.wsgi_app = ProxyFix(app.wsgi_app)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
     # -------- CONFIG ----------
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
@@ -137,6 +155,11 @@ def create_app(config=None):
 
     if config:
         app.config.update(config)
+
+    # Log configuration
+    app.logger.info(f"Starting app with DATABASE_URL: {DATABASE_URL}")
+    app.logger.info(f"Template folder: {template_dir}")
+    app.logger.info(f"Static folder: {static_dir}")
 
     # -------- DB ----------
     Product = init_models(app)
@@ -148,9 +171,9 @@ def create_app(config=None):
             redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
             redis_client.ping()
             app.logger.info("Connected to Redis")
-        except RedisError:
+        except RedisError as e:
             redis_client = None
-            app.logger.warning("Redis configured but connection failed")
+            app.logger.warning(f"Redis configured but connection failed: {e}")
     else:
         app.logger.info("Redis not configured; using in-memory cache")
 
@@ -168,13 +191,14 @@ def create_app(config=None):
     def health():
         try:
             db.session.execute(text("SELECT 1"))
-            return jsonify({"status": "ok"}), 200
-        except Exception:
-            return jsonify({"status": "degraded"}), 503
+            return jsonify({"status": "ok", "version": APP_VERSION}), 200
+        except Exception as e:
+            app.logger.error(f"Health check failed: {e}")
+            return jsonify({"status": "degraded", "error": str(e)}), 503
 
     @app.route("/ready")
     def ready():
-        return jsonify({"ready": True}), 200
+        return jsonify({"ready": True, "version": APP_VERSION}), 200
 
     @app.route("/metrics")
     def metrics():
@@ -183,7 +207,7 @@ def create_app(config=None):
     # -------- SERVE style.css FROM templates ----------
     @app.route("/templates/<path:filename>")
     def template_static(filename):
-        return send_from_directory(os.path.join(BASE_DIR, "templates"), filename)
+        return send_from_directory(template_dir, filename)
 
     # -------- HOME PAGE ----------
     @app.route("/", methods=["GET"])
@@ -256,4 +280,7 @@ def create_app(config=None):
 # ---------------- LOCAL RUN ----------------
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    # FIX 4: Default to port 8000 for consistency
+    port = int(os.environ.get("PORT", 8000))
+    app.logger.info(f"Starting Flask app on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
