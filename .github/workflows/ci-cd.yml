@@ -383,8 +383,12 @@ jobs:
           --create-namespace \
           --wait --timeout 5m
 
-    - name: Create Application Secrets
+    - name: Create Namespace and Secrets
       run: |
+        echo "=== Creating Namespace ==="
+        kubectl apply -f k8s/namespace.yaml
+        
+        echo ""
         echo "=== Creating Kubernetes Secrets ==="
         
         # Check if secret already exists
@@ -411,16 +415,9 @@ jobs:
         echo "=== Deploying Application ==="
         echo "Full image path: $FULL_IMAGE"
         
-        # Apply namespace first
-        kubectl apply -f k8s/namespace.yaml
-        
         # Show the YAML before sed replacement
         echo "=== Original deployment YAML (first 40 lines) ==="
         head -40 k8s/product-deployment.yaml
-        
-        # Show the YAML after sed replacement
-        echo "=== Deployment YAML after image replacement (first 40 lines) ==="
-        sed "s|IMAGE_REPLACED_BY_CI|$FULL_IMAGE|g" k8s/product-deployment.yaml | head -40
         
         # Apply the deployment with image replacement
         sed "s|IMAGE_REPLACED_BY_CI|$FULL_IMAGE|g" k8s/product-deployment.yaml | kubectl apply -f -
