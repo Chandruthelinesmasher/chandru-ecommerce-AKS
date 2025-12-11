@@ -1,4 +1,4 @@
-name: Full Infra + App Deployment (Automated AKS + ACR)
+name: Full Infra + App Deployment (Automatic + No Manual Terraform)
 
 on:
   push:
@@ -12,61 +12,86 @@ env:
 
 jobs:
 
-####################################################################################
-# 1) Stage: Terraform Infra Creation
-####################################################################################
-  terraform-infra:
-    name: 1️⃣ Provision Infrastructure (Terraform)
+  #########################################################
+  # STAGE 1 — CHECKOUT + LOGIN + BACKEND SETUP
+  #########################################################
+  setup:
+    name: "Stage 1: Checkout & Backend Setup"
     runs-on: ubuntu-latest
 
-    permissions:
-      id-token: write
-      contents: read
-
     outputs:
-      acr_login_server: ${{ steps.out.outputs.acr_login_server }}
-      acr_name: ${{ steps.out.outputs.acr_name }}
-      aks_name: ${{ steps.out.outputs.aks_name }}
-      resource_group: ${{ steps.out.outputs.resource_group }}
+      storage_account: ${{ steps.backend.outputs.storage }}
+      container_name: ${{ steps.backend.outputs.container }}
 
     steps:
-
-    - name: Checkout
+    - name: Checkout Repo
       uses: actions/checkout@v4
 
-    - name: Azure Login (OIDC)
+    - name: Login to Azure (OIDC)
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-    - name: Create Storage Backend
+    - name: Create Terraform Backend
+      id: backend
       run: |
         RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
         STORAGE="tf${GITHUB_RUN_ID}state"
         STORAGE=$(echo $STORAGE | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER="tfstate"
 
-        az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} --only-show-errors
-        az storage account create -n $STORAGE -g $RESOURCE_GROUP -l ${{ env.TF_VAR_location }} --sku Standard_LRS
-        az storage container create --name $CONTAINER --account-name $STORAGE
+        # Create RG if missing
+        if ! az group show -n $RESOURCE_GROUP &>/dev/null; then
+          az group create -n $RESOURCE_GROUP -l ${{ env.TF_VAR_location }}
+        fi
 
-        echo "STORAGE=$STORAGE" >> $GITHUB_ENV
-        echo "CONTAINER=$CONTAINER" >> $GITHUB_ENV
+        # Create Storage Account
+        az storage account create \
+          -n $STORAGE \
+          -g $RESOURCE_GROUP \
+          -l ${{ env.TF_VAR_location }} \
+          --sku Standard_LRS
 
-    - name: Add backend.tf
+        # Create Container
+        az storage container create \
+          --name $CONTAINER \
+          --account-name $STORAGE
+
+        echo "storage=$STORAGE" >> $GITHUB_OUTPUT
+        echo "container=$CONTAINER" >> $GITHUB_OUTPUT
+
+    - name: Write Backend File
       run: |
         cat > terraform/backend.tf <<EOF
         terraform {
           backend "azurerm" {
             resource_group_name  = "${{ env.TF_VAR_resource_group_name }}"
-            storage_account_name = "${{ env.STORAGE }}"
-            container_name       = "${{ env.CONTAINER }}"
+            storage_account_name = "${{ steps.backend.outputs.storage }}"
+            container_name       = "${{ steps.backend.outputs.container }}"
             key                  = "terraform.tfstate"
           }
         }
         EOF
+
+  #########################################################
+  # STAGE 2 — TERRAFORM INIT + IMPORT + APPLY
+  #########################################################
+  terraform:
+    name: "Stage 2: Terraform Apply Infra"
+    needs: setup
+    runs-on: ubuntu-latest
+
+    outputs:
+      acr_name: ${{ steps.outputs.outputs.acr_name }}
+      acr_login_server: ${{ steps.outputs.outputs.acr_login_server }}
+      aks_name: ${{ steps.outputs.outputs.aks_name }}
+      resource_group: ${{ steps.outputs.outputs.resource_group }}
+
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v4
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
@@ -83,6 +108,31 @@ jobs:
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
+    - name: Import Resource Group
+      run: |
+        cd terraform
+        terraform import azurerm_resource_group.rg \
+          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }} || true
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
+    - name: Import VNet + Subnet
+      run: |
+        cd terraform
+        terraform import azurerm_virtual_network.vnet \
+          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet || true
+
+        terraform import azurerm_subnet.aks_subnet \
+          /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.TF_VAR_resource_group_name }}/providers/Microsoft.Network/virtualNetworks/${{ env.TF_VAR_resource_group_name }}-vnet/subnets/${{ env.TF_VAR_resource_group_name }}-aks-subnet || true
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+
     - name: Terraform Apply
       run: |
         cd terraform
@@ -93,8 +143,8 @@ jobs:
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
-    - name: Fetch Terraform Outputs
-      id: out
+    - name: Capture Terraform Outputs
+      id: outputs
       run: |
         cd terraform
         echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
@@ -102,22 +152,19 @@ jobs:
         echo "aks_name=$(terraform output -raw aks_name)" >> $GITHUB_OUTPUT
         echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
 
-####################################################################################
-# 2) Stage: Build Docker Image
-####################################################################################
-  build-image:
-    name: 2️⃣ Build & Push Docker Image
+  #########################################################
+  # STAGE 3 — ACR BUILD + PUSH
+  #########################################################
+  build:
+    name: "Stage 3: Build & Push Docker Image"
+    needs: terraform
     runs-on: ubuntu-latest
-    needs: terraform-infra
-
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout Repo
+      uses: actions/checkout@v4
 
-    - name: Login to Azure (OIDC)
+    - name: Login to Azure
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -125,86 +172,70 @@ jobs:
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
     - name: ACR Login
-      run: |
-        az acr login --name ${{ needs.terraform-infra.outputs.acr_name }}
+      run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
 
-    - name: Build Image
+    - name: Build & Push Image
       run: |
-        docker build -t ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
+        docker build -t ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
+        docker push ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}
 
-    - name: Push Image
-      run: |
-        docker push ${{ needs.terraform-infra.outputs.acr_login_server }}/product:${{ github.sha }}
-
-####################################################################################
-# 3) Stage: Configure AKS access
-####################################################################################
-  aks-setup:
-    name: 3️⃣ Configure AKS Access + Attach ACR
+  #########################################################
+  # STAGE 4 — DEPLOY TO AKS
+  #########################################################
+  deploy:
+    name: "Stage 4: Deploy to AKS"
+    needs: [terraform, build]
     runs-on: ubuntu-latest
-    needs: [terraform-infra, build-image]
 
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Login Azure
-      uses: azure/login@v2
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    - name: Attach ACR to AKS
-      run: |
-        az aks update \
-          --name ${{ needs.terraform-infra.outputs.aks_name }} \
-          --resource-group ${{ needs.terraform-infra.outputs.resource_group }} \
-          --attach-acr ${{ needs.terraform-infra.outputs.acr_name }}
+    - name: Checkout Repo
+      uses: actions/checkout@v4
 
     - name: Set AKS Context
       uses: azure/aks-set-context@v3
       with:
-        cluster-name: ${{ needs.terraform-infra.outputs.aks_name }}
-        resource-group: ${{ needs.terraform-infra.outputs.resource_group }}
+        cluster-name: ${{ needs.terraform.outputs.aks_name }}
+        resource-group: ${{ needs.terraform.outputs.resource_group }}
 
-####################################################################################
-# 4) Stage: Deploy App
-####################################################################################
-  deploy:
-    name: 4️⃣ Deploy App to AKS
-    runs-on: ubuntu-latest
-    needs: [aks-setup]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Apply Namespace
-      run: kubectl apply -f k8s/namespace.yaml
-
-    - name: Deploy Product App
+    - name: Install Ingress Controller
       run: |
-        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.aks-setup.outputs.acr_login_server }}/product:${{ github.sha }}|" k8s/product-deployment.yaml | kubectl apply -f -
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+        helm repo update
 
+        helm upgrade --install nginx-ingress ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx \
+          --create-namespace \
+          --wait --timeout 5m
+
+    - name: Deploy Kubernetes Manifests
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}|" k8s/product-deployment.yaml | kubectl apply -f -
         kubectl apply -f k8s/product-service.yaml
         kubectl apply -f k8s/product-hpa.yaml
         kubectl apply -f k8s/product-pdb.yaml
         kubectl apply -f k8s/ingress.yaml
 
-####################################################################################
-# 5) Stage: Verify Deployment
-####################################################################################
+  #########################################################
+  # STAGE 5 — VERIFY DEPLOYMENT
+  #########################################################
   verify:
-    name: 5️⃣ Verify Deployment
-    runs-on: ubuntu-latest
+    name: "Stage 5: Verify Deployment"
     needs: deploy
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Wait for pods
-      run: |
-        kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s
+    - name: Set AKS Context
+      uses: azure/aks-set-context@v3
+      with:
+        cluster-name: ${{ needs.deploy.needs.terraform.outputs.aks_name }}
+        resource-group: ${{ needs.deploy.needs.terraform.outputs.resource_group }}
 
-    - name: Show resources
+    - name: Wait for Pods
       run: |
-        kubectl get pods -n ecomm
-        kubectl get svc -n ecomm
+        kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
+
+    - name: Show Ingress IP
+      run: |
+        kubectl get svc -n ingress-nginx
         kubectl get ingress -n ecomm

@@ -1,34 +1,51 @@
-name: Destroy Infrastructure (Manual + Safe)
+name: Destroy Azure Infrastructure (Manual Approval Required)
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: "Type YES to confirm deleting ALL infrastructure"
+        required: true
+        default: "NO"
+
+env:
+  TF_VAR_location: "eastus"
+  TF_VAR_resource_group_name: "rg-chandru-ecomm"
+  TF_LOG: INFO
 
 jobs:
 
-  approve:
-    name: 🛑 Manual Approval Required
+  ###############################################################
+  # STAGE 1 — VALIDATE APPROVAL
+  ###############################################################
+  validate:
+    name: Validate User Input
     runs-on: ubuntu-latest
 
     steps:
-    - name: Waiting for approval…
-      uses: trstringer/manual-approval@v1
-      with:
-        secret: ${{ secrets.GITHUB_TOKEN }}
-        approvers: chandru03
-        minimum-approvals: 1
+    - name: Check Approval
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "YES" ]; then
+          echo "❌ Confirmation failed. You must type YES to destroy."
+          exit 1
+        fi
+        echo "✅ Destroy confirmed. Proceeding..."
 
-  destroy:
-    name: 💣 Destroy Terraform Infrastructure
+  ###############################################################
+  # STAGE 2 — LOGIN + SETUP BACKEND
+  ###############################################################
+  setup:
+    name: Setup Terraform Backend
+    needs: validate
     runs-on: ubuntu-latest
-    needs: approve
 
-    permissions:
-      id-token: write
-      contents: read
+    outputs:
+      storage: ${{ steps.b.outputs.storage }}
+      container: ${{ steps.b.outputs.container }}
 
     steps:
-
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
     - name: Azure Login (OIDC)
       uses: azure/login@v2
@@ -36,6 +53,29 @@ jobs:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
         tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Read Storage Account + Container from backend.tf
+      id: b
+      run: |
+        STORAGE=$(grep "storage_account_name" terraform/backend.tf | awk -F '"' '{print $2}')
+        CONTAINER=$(grep "container_name" terraform/backend.tf | awk -F '"' '{print $2}')
+
+        echo "storage=$STORAGE" >> $GITHUB_OUTPUT
+        echo "container=$CONTAINER" >> $GITHUB_OUTPUT
+
+        echo "Using storage: $STORAGE"
+        echo "Using container: $CONTAINER"
+
+  ###############################################################
+  # STAGE 3 — TERRAFORM INIT
+  ###############################################################
+  init:
+    name: Terraform Init
+    needs: setup
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
@@ -52,6 +92,24 @@ jobs:
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
+  ###############################################################
+  # STAGE 4 — TERRAFORM DESTROY
+  ###############################################################
+  destroy:
+    name: Destroy All Resources
+    needs: init
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Login to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
     - name: Terraform Destroy
       run: |
         cd terraform
@@ -61,3 +119,27 @@ jobs:
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
+
+  ###############################################################
+  # STAGE 5 — CLEANUP CHECK
+  ###############################################################
+  cleanup:
+    name: Verify Cleanup
+    needs: destroy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Check If Resource Group Still Exists
+      run: |
+        if az group exists -n ${{ env.TF_VAR_resource_group_name }}; then
+          echo "⚠️ Resource group still exists. Manual cleanup may be required."
+        else
+          echo "🎉 All resources successfully destroyed!"
+        fi
