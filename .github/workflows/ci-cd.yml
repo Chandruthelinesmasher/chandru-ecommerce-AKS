@@ -398,12 +398,15 @@ jobs:
         fi
         
         # Create the secret with environment variables
+        # Note: Add all keys that your deployment references
         kubectl create secret generic product-secrets \
           --namespace=ecomm \
           --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL || 'postgresql://user:password@postgres:5432/productdb' }}" \
           --from-literal=REDIS_URL="${{ secrets.REDIS_URL || 'redis://redis:6379' }}" \
           --from-literal=API_KEY="${{ secrets.API_KEY || 'default-api-key' }}" \
-          --from-literal=JWT_SECRET="${{ secrets.JWT_SECRET || 'default-jwt-secret' }}"
+          --from-literal=JWT_SECRET="${{ secrets.JWT_SECRET || 'default-jwt-secret' }}" \
+          --from-literal=secret-key="${{ secrets.SECRET_KEY || 'default-secret-key-change-in-production' }}" \
+          --from-literal=SECRET_KEY="${{ secrets.SECRET_KEY || 'default-secret-key-change-in-production' }}"
         
         echo "✅ Secret created successfully"
         kubectl describe secret product-secrets -n ecomm
