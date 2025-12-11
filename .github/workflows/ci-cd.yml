@@ -43,21 +43,41 @@ jobs:
       id: backend
       run: |
         RESOURCE_GROUP=${{ env.TF_VAR_resource_group_name }}
-        STORAGE="tf${GITHUB_RUN_ID}state"
-        STORAGE=$(echo "$STORAGE" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
+        # Use a consistent storage account name based on resource group
+        STORAGE="tfstatechandru"
         CONTAINER="tfstate"
 
-        az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
+        # Create resource group if it doesn't exist
+        if ! az group show -n "$RESOURCE_GROUP" &>/dev/null; then
+          echo "Creating resource group $RESOURCE_GROUP..."
+          az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
+        else
+          echo "Resource group $RESOURCE_GROUP already exists"
+        fi
 
-        az storage account create \
-          -n "$STORAGE" \
-          -g "$RESOURCE_GROUP" \
-          -l ${{ env.TF_VAR_location }} \
-          --sku Standard_LRS
+        # Create storage account if it doesn't exist
+        if ! az storage account show -n "$STORAGE" -g "$RESOURCE_GROUP" &>/dev/null; then
+          echo "Creating storage account $STORAGE..."
+          az storage account create \
+            -n "$STORAGE" \
+            -g "$RESOURCE_GROUP" \
+            -l ${{ env.TF_VAR_location }} \
+            --sku Standard_LRS
+        else
+          echo "Storage account $STORAGE already exists"
+        fi
 
-        az storage container create \
-          --name "$CONTAINER" \
-          --account-name "$STORAGE"
+        # Create container if it doesn't exist
+        ACCOUNT_KEY=$(az storage account keys list -g "$RESOURCE_GROUP" -n "$STORAGE" --query '[0].value' -o tsv)
+        if ! az storage container show --name "$CONTAINER" --account-name "$STORAGE" --account-key "$ACCOUNT_KEY" &>/dev/null; then
+          echo "Creating container $CONTAINER..."
+          az storage container create \
+            --name "$CONTAINER" \
+            --account-name "$STORAGE" \
+            --account-key "$ACCOUNT_KEY"
+        else
+          echo "Container $CONTAINER already exists"
+        fi
 
         echo "storage=$STORAGE" >> $GITHUB_OUTPUT
         echo "container=$CONTAINER" >> $GITHUB_OUTPUT
