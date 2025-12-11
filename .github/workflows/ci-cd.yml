@@ -237,6 +237,14 @@ jobs:
         echo "ACR Name: ${{ needs.terraform.outputs.acr_name }}"
         echo "ACR Login Server: ${{ needs.terraform.outputs.acr_login_server }}"
 
+    - name: Attach ACR to AKS
+      run: |
+        echo "Attaching ACR to AKS for image pull permissions..."
+        az aks update \
+          --name ${{ needs.terraform.outputs.aks_name }} \
+          --resource-group ${{ needs.terraform.outputs.resource_group }} \
+          --attach-acr ${{ needs.terraform.outputs.acr_name }}
+
     - name: ACR Login
       run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
 
