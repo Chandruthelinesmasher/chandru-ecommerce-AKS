@@ -238,7 +238,23 @@ jobs:
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
 
-    - name: Terraform Destroy
+    - name: Pre-Destroy - Remove Backend Storage from State (if requested)
+      if: github.event.inputs.delete_backend == 'YES'
+      run: |
+        cd terraform
+        echo "=== Removing backend storage from Terraform state ==="
+        # Remove the storage account from state so Terraform doesn't try to manage it
+        terraform state rm azurerm_storage_account.backend 2>/dev/null || echo "Backend storage not in state"
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_USE_OIDC: true
+      continue-on-error: true
+
+    - name: Terraform Destroy (Attempt 1)
+      id: destroy_attempt
+      continue-on-error: true
       run: |
         cd terraform
         echo "=== Destroying Infrastructure ==="
@@ -248,6 +264,29 @@ jobs:
         ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         ARM_USE_OIDC: true
+
+    - name: Manual Cleanup of Remaining Resources
+      if: steps.destroy_attempt.outcome == 'failure'
+      run: |
+        echo "=== Terraform destroy failed, cleaning up manually ==="
+        
+        # Delete backend storage account if it exists
+        if az storage account show -n tfstatechandru -g ${{ env.TF_VAR_resource_group_name }} &>/dev/null; then
+          echo "Deleting backend storage account..."
+          az storage account delete \
+            --name tfstatechandru \
+            --resource-group ${{ env.TF_VAR_resource_group_name }} \
+            --yes
+        fi
+        
+        # Force delete the entire resource group
+        echo "Force deleting resource group..."
+        az group delete \
+          --name ${{ env.TF_VAR_resource_group_name }} \
+          --yes \
+          --no-wait
+        
+        echo "✅ Cleanup initiated"
 
     - name: Verify Resources Destroyed
       run: |
