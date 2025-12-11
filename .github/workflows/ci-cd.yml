@@ -47,7 +47,7 @@ jobs:
         STORAGE=$(echo "$STORAGE" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
         CONTAINER="tfstate"
 
-        az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }} --tags project=chandru-ecomm
+        az group create -n "$RESOURCE_GROUP" -l ${{ env.TF_VAR_location }}
 
         az storage account create \
           -n "$STORAGE" \
@@ -62,7 +62,7 @@ jobs:
         echo "storage=$STORAGE" >> $GITHUB_OUTPUT
         echo "container=$CONTAINER" >> $GITHUB_OUTPUT
 
-    - name: Write Backend File
+    - name: Write Backend Config
       run: |
         mkdir -p terraform
         cat > terraform/backend.tf <<EOF
@@ -110,7 +110,7 @@ EOF
         terraform_version: 1.9.0
         terraform_wrapper: false
 
-    - name: Azure Login (OIDC)
+    - name: Azure Login
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -121,6 +121,7 @@ EOF
       run: |
         cd terraform
         terraform init
+
       env:
         ARM_USE_OIDC: true
 
@@ -128,6 +129,7 @@ EOF
       run: |
         cd terraform
         terraform apply -auto-approve
+
       env:
         ARM_USE_OIDC: true
 
@@ -151,7 +153,7 @@ EOF
     steps:
     - uses: actions/checkout@v4
 
-    - name: Azure Login
+    - name: Login to Azure
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -161,7 +163,7 @@ EOF
     - name: ACR Login
       run: az acr login --name ${{ needs.terraform.outputs.acr_name }}
 
-    - name: Build & Push Container
+    - name: Build & Push Image
       run: |
         docker build -t ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }} ./services/product
         docker push ${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}
@@ -177,7 +179,7 @@ EOF
     steps:
     - uses: actions/checkout@v4
 
-    - name: Azure Login
+    - name: Login to Azure
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -190,7 +192,7 @@ EOF
         cluster-name: ${{ needs.terraform.outputs.aks_name }}
         resource-group: ${{ needs.terraform.outputs.resource_group }}
 
-    - name: Install Ingress Controller
+    - name: Install NGINX Ingress
       run: |
         helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
         helm repo update
@@ -199,7 +201,7 @@ EOF
           --create-namespace \
           --wait --timeout 5m
 
-    - name: Deploy App
+    - name: Deploy Kubernetes Resources
       run: |
         kubectl apply -f k8s/namespace.yaml
         sed "s|IMAGE_REPLACED_BY_CI|${{ needs.terraform.outputs.acr_login_server }}/product:${{ github.sha }}|" \
@@ -231,10 +233,9 @@ EOF
         cluster-name: ${{ needs.terraform.outputs.aks_name }}
         resource-group: ${{ needs.terraform.outputs.resource_group }}
 
-    - name: Verify Pods
+    - name: Wait for Pods
       run: |
         kubectl wait --for=condition=ready pod -l app=product -n ecomm --timeout=300s || true
 
-    - name: Show Endpoint
-      run: |
-        kubectl get ingress -n ecomm
+    - name: Show Ingress Endpoint
+      run: kubectl get ingress -n ecomm
