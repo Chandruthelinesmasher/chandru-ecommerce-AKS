@@ -324,7 +324,9 @@ jobs:
       run: |
         echo "=== Checking Resource Group Status ==="
         
-        if az group exists -n ${{ env.TF_VAR_resource_group_name }}; then
+        RG_EXISTS=$(az group exists -n ${{ env.TF_VAR_resource_group_name }})
+        
+        if [ "$RG_EXISTS" == "true" ]; then
           echo "Resource group still exists"
           echo "exists=true" >> $GITHUB_OUTPUT
           
@@ -335,6 +337,7 @@ jobs:
         else
           echo "✅ Resource group has been deleted"
           echo "exists=false" >> $GITHUB_OUTPUT
+          echo "count=0" >> $GITHUB_OUTPUT
         fi
 
     - name: List Remaining Resources
